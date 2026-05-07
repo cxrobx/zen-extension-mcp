@@ -4,6 +4,18 @@ All notable changes to this project will be documented here. Versions track the
 extension manifest and the AMO-signed XPI artifacts. Server, daemon, and shared
 package versions move together with the extension.
 
+## 0.0.8 (keepalive)
+
+- Add `browser.alarms` "zen-ext-keepalive" firing every 30 seconds. The alarm
+  keeps the MV3 background alive across Firefox's idle suspension and re-kicks
+  the WebSocket connect if the previous one was torn down. Without this, the
+  extension's background suspends after ~80 seconds of "idle" (despite the
+  active WebSocket), `setTimeout`-based reconnect timers die with it, and the
+  extension stays disconnected until something else wakes it (e.g. opening
+  the options page). Long-lived WebSockets do not, in practice, keep MV3
+  backgrounds alive in Firefox 147.
+- New manifest permission: `alarms`.
+
 ## 0.0.7 (Milestone 4)
 
 - New tool: `get_firefox_info`. Returns MCP server identity (name, version,

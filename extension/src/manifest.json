@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "Zen Extension MCP Bridge",
   "short_name": "zen-ext-mcp",
-  "version": "0.0.7",
+  "version": "0.0.8",
   "description": "Bridges Zen/Firefox to the zen-extension-mcp daemon over a localhost WebSocket so MCP clients can drive container-scoped browser automation.",
   "browser_specific_settings": {
     "gecko": {
@@ -23,7 +23,8 @@
     "storage",
     "scripting",
     "activeTab",
-    "webNavigation"
+    "webNavigation",
+    "alarms"
   ],
   "host_permissions": ["<all_urls>"],
   "options_ui": {

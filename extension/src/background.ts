@@ -1,6 +1,8 @@
 import { DaemonConnection } from "./connection.js";
 import { loadSettings, onSettingsChanged } from "./settings.js";
 
+const KEEPALIVE_ALARM = "zen-ext-keepalive";
+
 const connection = new DaemonConnection({ url: "", token: "" });
 
 connection.onState((state) => {
@@ -22,4 +24,13 @@ browser.runtime.onMessage.addListener((message) => {
     return Promise.resolve(connection.getState());
   }
   return undefined;
+});
+
+browser.alarms.create(KEEPALIVE_ALARM, { periodInMinutes: 0.5 });
+browser.alarms.onAlarm.addListener((alarm) => {
+  if (alarm.name !== KEEPALIVE_ALARM) return;
+  const state = connection.getState();
+  if (state.status !== "authenticated" && state.status !== "connecting") {
+    connection.start();
+  }
 });
