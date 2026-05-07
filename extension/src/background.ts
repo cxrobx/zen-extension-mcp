@@ -29,8 +29,7 @@ browser.runtime.onMessage.addListener((message) => {
 browser.alarms.create(KEEPALIVE_ALARM, { periodInMinutes: 0.5 });
 browser.alarms.onAlarm.addListener((alarm) => {
   if (alarm.name !== KEEPALIVE_ALARM) return;
-  const state = connection.getState();
-  if (state.status !== "authenticated" && state.status !== "connecting") {
-    connection.start();
+  if (!connection.isHealthy()) {
+    connection.forceReconnect();
   }
 });

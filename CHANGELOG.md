@@ -4,6 +4,19 @@ All notable changes to this project will be documented here. Versions track the
 extension manifest and the AMO-signed XPI artifacts. Server, daemon, and shared
 package versions move together with the extension.
 
+## 0.0.9 (keepalive bug fix)
+
+- `connect()` was bailing on a stale `this.ws` even when the socket was
+  already CLOSED. The keepalive alarm checked the cached `state` field
+  ("authenticated") rather than the actual `ws.readyState`, so after the
+  daemon restarted the alarm thought everything was fine and never kicked
+  a new connect. Fix: alarm calls a new `isHealthy()` (returns
+  `ws.readyState === OPEN`) and triggers `forceReconnect()` if not. Connect
+  now gates on `OPEN || CONNECTING`, treats CLOSED/CLOSING as null.
+- Verified: killed the daemon process; launchd restarted it; extension
+  reconnected within ~450ms via the keepalive alarm without any user
+  action.
+
 ## 0.0.8 (keepalive)
 
 - Add `browser.alarms` "zen-ext-keepalive" firing every 30 seconds. The alarm

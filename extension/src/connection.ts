@@ -70,6 +70,27 @@ export class DaemonConnection {
     return this.state;
   }
 
+  isHealthy(): boolean {
+    return this.ws !== null && this.ws.readyState === WebSocket.OPEN;
+  }
+
+  forceReconnect(): void {
+    if (this.reconnectTimer) {
+      clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = null;
+    }
+    this.reconnectAttempt = 0;
+    if (this.ws) {
+      try {
+        this.ws.close();
+      } catch {
+        // ignored
+      }
+      this.ws = null;
+    }
+    if (!this.stopped) this.connect();
+  }
+
   private setState(state: ConnectionState): void {
     this.state = state;
     for (const l of this.listeners) l(state);
@@ -77,7 +98,16 @@ export class DaemonConnection {
 
   private connect(): void {
     if (this.stopped) return;
-    if (this.ws) return;
+    if (
+      this.ws &&
+      (this.ws.readyState === WebSocket.OPEN ||
+        this.ws.readyState === WebSocket.CONNECTING)
+    ) {
+      return;
+    }
+    if (this.ws) {
+      this.ws = null;
+    }
     if (!this.config.url || !this.config.token) {
       this.setState({ status: "error", reason: "missing daemon URL or token" });
       return;
