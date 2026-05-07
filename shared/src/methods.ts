@@ -173,3 +173,14 @@ export interface ScreenshotPageResult {
   tabId: number;
   dataUrl: string;
 }
+
+export interface InfoGetResult {
+  extensionId: string;
+  extensionVersion: string;
+  userAgent: string;
+  platform: string;
+  windowCount: number;
+  tabCount: number;
+  containerCount: number;
+  protocolVersion: number;
+}

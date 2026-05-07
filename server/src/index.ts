@@ -12,7 +12,7 @@ import {
 import { type ScopeRef, registerTools } from "./tools.js";
 
 const SERVER_NAME = "zen-ext-mcp";
-const SERVER_VERSION = "0.0.2";
+const SERVER_VERSION = "0.0.3";
 
 function logStderr(msg: string, fields?: Record<string, unknown>): void {
   const entry = { ts: new Date().toISOString(), source: "server", message: msg, ...fields };
@@ -55,7 +55,11 @@ async function main(): Promise<void> {
   }
 
   const server = new McpServer({ name: SERVER_NAME, version: SERVER_VERSION });
-  registerTools(server, daemon, scope);
+  registerTools(server, daemon, scope, {
+    name: SERVER_NAME,
+    version: SERVER_VERSION,
+    daemonUrl: url,
+  });
 
   const transport = new StdioServerTransport();
   await server.connect(transport);

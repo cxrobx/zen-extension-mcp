@@ -7,12 +7,14 @@ import {
   type FillFormParams,
   type FillParams,
   type FirefoxContainer,
+  type InfoGetResult,
   Methods,
   type NavigateHistoryParams,
   type NavigatePageParams,
   type NewPageParams,
   type NewPageResult,
   type PageInfo,
+  PROTOCOL_VERSION,
   type ResolveUidResult,
   type ScreenshotPageParams,
   type ScreenshotPageResult,
@@ -386,5 +388,25 @@ export const handlers: Record<string, Handler> = {
       [code],
     );
     return { result };
+  },
+
+  [Methods.InfoGet]: async (): Promise<InfoGetResult> => {
+    const manifest = browser.runtime.getManifest();
+    const [tabs, windows, identities, platform] = await Promise.all([
+      browser.tabs.query({}),
+      browser.windows.getAll({}),
+      browser.contextualIdentities.query({}),
+      browser.runtime.getPlatformInfo(),
+    ]);
+    return {
+      extensionId: browser.runtime.id ?? "",
+      extensionVersion: manifest.version ?? "",
+      userAgent: navigator.userAgent,
+      platform: `${platform.os}/${platform.arch}`,
+      windowCount: windows.length,
+      tabCount: tabs.length,
+      containerCount: identities.length,
+      protocolVersion: PROTOCOL_VERSION,
+    };
   },
 };

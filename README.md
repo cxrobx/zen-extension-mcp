@@ -1,140 +1,228 @@
 # zen-extension-mcp
 
-WebExtension-backed MCP for Zen / Firefox. Three pieces talking over a localhost WebSocket:
+WebExtension-backed MCP for Zen / Firefox. Sister project to [`zen-mcp`](../zen-mcp), which uses Marionette/Selenium and requires launching the browser with flags. This one lives as a permanently-installed signed extension in your daily Zen — no flags, no restarts, container scoping per MCP entry.
 
 ```
-Claude Code  ---stdio--->  MCP server  --ws-->  daemon  <--ws--  MV3 extension (in Zen)
-                            (per session)        (long-lived)     (installed once)
+Claude Code  --stdio-->  MCP server (per session, --container-scoped)
+                              |
+                              | ws://127.0.0.1:8766
+                              v
+                         daemon (long-lived router)
+                              ^
+                              | ws (token auth, 30s heartbeat)
+                              |
+                         MV3 extension (signed, in daily Zen)
 ```
 
-This is the v1 spike for Milestone 1: prove the bridge, prove signed-extension install survives Zen restarts, prove container-scoped tab ops work without launching Zen with any flags. Sister project to `zen-mcp`, which keeps the Marionette/Selenium backend for privileged-context tools.
+## When to use this vs `zen-mcp`
 
-## Why three processes
+| Use this | Use `zen-mcp` |
+|---|---|
+| Day-to-day automation in your real Zen | Need privileged-context tools (`evaluate_privileged_script`, `set_firefox_prefs`) |
+| Multiple container-scoped MCP entries (`zen-cxv`, `zen-personal`, etc.) sharing one browser | Need full network capture with response bodies |
+| Browser must keep running uninterrupted | Need reliable `upload_file_by_uid` |
 
-- The **daemon** owns the WebSocket port. One process, lives across Claude Code sessions, holds the single extension connection.
-- Each **MCP server** is short-lived — one per `claude mcp add` entry. Connects to the daemon as a client, scoped by `--container <name>` at startup. Three separate `claude mcp add` entries (e.g. `zen-cxv`, `zen-buildersbuddy`, `zen-personal`) all share the same daemon and the same extension.
-- The **extension** runs inside daily Zen. Connects to the daemon, handles RPC requests against the WebExtension API surface (containers, tabs, scripting).
+The two coexist. They run different daemons by default. v1 of this project is **20 tools**; the rest of zen-mcp's surface stays where it is.
 
-## Layout
+## Tool surface (v1, 20 tools)
 
-```
-shared/      RPC types, method names, error codes (single source of truth)
-daemon/      WebSocket router, auth + heartbeat, request fan-out
-server/      MCP stdio server; registers tools that proxy through the daemon
-extension/   MV3 WebExtension (background script + options page)
-```
+| Bucket | Tools |
+|---|---|
+| **Containers** | `list_containers`, `set_default_container`, `new_page_in_container` |
+| **Pages** | `list_pages`, `new_page`, `navigate_page`, `select_page`, `close_page`, `navigate_history`, `screenshot_page` |
+| **DOM** | `take_snapshot`, `clear_snapshot`, `click_by_uid`, `hover_by_uid`, `fill_by_uid`, `fill_form_by_uid`, `drag_by_uid_to_uid`, `resolve_uid_to_selector`, `evaluate_script` |
+| **Diagnostics** | `get_firefox_info` |
 
-## Install (developer)
+Dropped from `zen-mcp` because no WebExtension equivalent: `list_privileged_contexts` / `select_privileged_context` / `evaluate_privileged_script`, `set_firefox_prefs` / `get_firefox_prefs`, `restart_firefox`, `upload_file_by_uid`, `install_extension` / `list_extensions` / `uninstall_extension`.
 
-Requires Node 20+.
+Deferred to v2 (need degraded-fidelity content-script bridges): `list_console_messages`, `clear_console_messages`, `list_network_requests`, `get_network_request`, `accept_dialog`, `dismiss_dialog`, `screenshot_by_uid`, full-page screenshot.
+
+Fidelity gaps to know:
+- `screenshot_page` captures only the active tab's visible viewport. It calls `select_page` for you first.
+- `evaluate_script` requires JSON-serializable args/results (the `scripting.executeScript` constraint). Returning DOM nodes or non-serializable objects fails.
+
+## Requirements
+
+- Node 20+
+- Zen browser (Firefox 115+ derivative) — works in stock Firefox too
+- An [AMO](https://addons.mozilla.org) account (free) for signing the extension
+
+## Build
 
 ```sh
+git clone /path/to/zen-extension-mcp
+cd zen-extension-mcp
 npm install
 npm run build
 ```
 
-This compiles `shared/`, `daemon/`, `server/`, and bundles `extension/dist/` via esbuild.
+Produces:
+- `daemon/dist/index.js` — router process
+- `server/dist/index.js` — MCP stdio server
+- `extension/dist/` — MV3 extension bundle (esbuild IIFE, no module imports at runtime)
 
-## Running locally
+## Sign + install (one-time)
 
-### 1. Start the daemon
+### 1. Get AMO API credentials
+
+1. Sign in at https://addons.mozilla.org with a Firefox Account.
+2. Go to https://addons.mozilla.org/en-US/developers/addon/api/key/ — accept the developer agreement.
+3. Click **Generate new credentials**. You get:
+   - **JWT issuer** (looks like `user:1234567:42`)
+   - **JWT secret** (64-hex string, shown once — save somewhere durable)
+
+### 2. Sign
 
 ```sh
-node daemon/dist/index.js
+export AMO_KEY="user:1234567:42"
+export AMO_SECRET="..."
+npm run extension:sign
 ```
 
-On first launch the daemon writes a 32-byte random token to `~/.config/zen-extension-mcp/auth.token` (mode 0600). All later launches reuse that file. The daemon binds `127.0.0.1:8765` by default.
+`web-ext sign --channel=unlisted` uploads the bundle and Mozilla's automated signer returns a signed `.xpi` in `extension/web-ext-artifacts/`. Usually <60s. The `gecko.id` in `extension/src/manifest.json` (`zen-ext-mcp@cxrobx`) is per-developer — change it if you fork this so you don't collide.
 
-Flags:
-- `--port <n>` (default 8765, env `ZEN_EXT_MCP_PORT`)
-- `--host <addr>` (default 127.0.0.1, env `ZEN_EXT_MCP_HOST`)
-- `--token-file <path>` (default `~/.config/zen-extension-mcp/auth.token`)
+### 3. Install in Zen
 
-Set `ZEN_EXT_MCP_LOG=debug` for verbose stderr JSON logs.
+```sh
+open -a "/Applications/Zen.app" extension/web-ext-artifacts/d27cc...-X.Y.Z.xpi
+```
 
-### 2. Install the extension into Zen
+Accept the install prompt. **Then grant the host permission**:
 
-For development, load it temporarily (gone after browser restart):
+- `about:addons` -> Zen Extension MCP Bridge -> **Permissions and data** -> toggle **Access your data for all websites** ON.
+
+This is required for `screenshot_page` (`tabs.captureVisibleTab` rejects without it even though `<all_urls>` is declared). The other tools work without it.
+
+> **Upgrade gotcha**: in-place upgrades (open a newer XPI while old is installed) sometimes silently no-op in Zen. If the version doesn't change in `about:addons`, **remove the old extension first**, then install the new one. Storage (URL + token settings) gets wiped on full removal.
+
+### 4. Configure the extension
+
+Find the auth token:
+
+```sh
+cat ~/.config/zen-extension-mcp/auth.token
+```
+
+In Zen, open the extension's Preferences page (via `about:addons`'s `⋯` menu, or the toolbar puzzle-piece icon — varies by Zen UI version). Paste:
+
+- **Daemon URL**: `ws://127.0.0.1:8766`
+- **Auth token**: contents of `auth.token`
+
+Click Save. The pill should flip to `authenticated` within 1-2 seconds (it can take up to ~10s if the extension was recently restarted because of reconnect backoff).
+
+## Run
+
+### Start the daemon
+
+```sh
+node daemon/dist/index.js --port 8766
+```
+
+The daemon writes a 32-byte random token to `~/.config/zen-extension-mcp/auth.token` on first launch (mode 0600). All later launches reuse it.
+
+Default port is 8765 — many systems already have something there (`browsermcp`, `python -m http.server` for testing). If you collide, use `--port 8766`. Update the extension's options page URL to match.
+
+A simple launchd plist for keeping the daemon running:
+
+```xml
+<!-- ~/Library/LaunchAgents/io.cxrobx.zen-extension-mcp.daemon.plist -->
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>io.cxrobx.zen-extension-mcp.daemon</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/usr/local/bin/node</string>
+    <string>/Users/YOU/Projects/zen-extension-mcp/daemon/dist/index.js</string>
+    <string>--port</string>
+    <string>8766</string>
+  </array>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+</dict>
+</plist>
+```
+
+Load it: `launchctl load ~/Library/LaunchAgents/io.cxrobx.zen-extension-mcp.daemon.plist`.
+
+### Register MCP servers in Claude Code
+
+Each entry is short-lived (one per Claude Code session) and connects to the daemon as a client.
+
+**Single, no scoping**:
+
+```sh
+claude mcp add zen-ext node /abs/path/to/zen-extension-mcp/server/dist/index.js -- --port 8766
+```
+
+**Container-scoped** (one per container — they all share the daemon and extension):
+
+```sh
+claude mcp add zen-cxv          node /abs/path/.../server/dist/index.js -- --port 8766 --container CXVentures
+claude mcp add zen-buildersbuddy node /abs/path/.../server/dist/index.js -- --port 8766 --container Buildersbuddy
+claude mcp add zen-personal     node /abs/path/.../server/dist/index.js -- --port 8766 --container Personal
+```
+
+`--container <name>` resolves at server startup using the existing `zen-mcp` resolver: 0 matches errors with the available list; >1 matches errors with the matching list.
+
+When `--container` is set, `new_page` defaults to that cookieStoreId. `new_page_in_container` always takes an explicit name. `set_default_container` updates the scope at runtime for that MCP entry.
+
+## Architecture
+
+### Multi-entry pattern
+
+Three Claude Code MCP entries (e.g. `zen-cxv`, `zen-personal`, `zen-buildersbuddy`) each spawn a fresh **MCP server process**. All three connect to the same **daemon** (single TCP port). The daemon routes each request to the single **extension** and routes the response back to the originating client. Order-preserving with a per-request id; no cross-talk.
+
+Two MCP entries calling `new_page` simultaneously each open their own tab in their own container — the daemon doesn't serialize them.
+
+### Auth + heartbeat
+
+- **Token**: shared secret, 32 bytes random hex, stored at `~/.config/zen-extension-mcp/auth.token` (0600). First message on every connection must be a `hello` with the token within 5s. Constant-time compared via `crypto.timingSafeEqual`.
+- **Heartbeat**: daemon sends WebSocket pings every 30s. If no pong, the connection is terminated and (for clients) eligible for replacement.
+- **Reconnect**: clients (server + extension) reconnect with exponential backoff capped at 10s. Resets to 0 on `welcome`.
+
+### What the daemon owns
+
+The daemon binds the WebSocket port. Exactly **one** extension connection at a time (a new hello with role=extension replaces the old one and fails its in-flight requests). Many clients. Extension-bound requests are routed by request id; a per-id timer fails the call after 30s.
+
+### Snapshot caching
+
+`take_snapshot` injects `extension/dist/snapshot/inject.js` via `scripting.executeScript({ files, world: 'MAIN' })`, then calls `window.__zenExtMcpCreateSnapshot`. The returned `uidMap` is cached in the background script keyed by tabId. Subsequent `click_by_uid`/`fill_by_uid`/etc. resolve uid -> selector via the cache, then run an inline action `func` against `document.querySelector(selector)`.
+
+The cache is dropped on `webNavigation.onCommitted` (frame 0) and `tabs.onRemoved`. Take a fresh snapshot after any navigation.
+
+## Development loop
+
+For non-prod iteration, skip AMO signing — load the extension as a temporary add-on via `web-ext run`:
 
 ```sh
 npm run extension:run
 ```
 
-This runs `web-ext run --source-dir=extension/dist` and opens a temporary Firefox/Zen profile with the extension installed.
+This opens a fresh Firefox profile with `extension/dist/` loaded as a temporary extension, no signing required. The extension is gone after the dev profile closes — fine for development.
 
-For daily use, sign and install the XPI permanently — see [Signing](#signing) below.
-
-After install, open the extension's options page in Zen and paste in:
-- **Daemon URL**: `ws://127.0.0.1:8765`
-- **Auth token**: the contents of `~/.config/zen-extension-mcp/auth.token`
-
-The status pill should flip to `authenticated` within a second.
-
-### 3. Register the MCP server in Claude Code
-
-A single entry that lists all containers:
-
-```sh
-claude mcp add zen-ext node /absolute/path/to/zen-extension-mcp/server/dist/index.js
-```
-
-A container-scoped entry (matches the Marionette fork's `--container` flag — but no Zen restart, ever):
-
-```sh
-claude mcp add zen-cxv node /absolute/path/to/zen-extension-mcp/server/dist/index.js --container CXVentures
-```
-
-Multiple scoped entries are fine — they all connect through the same daemon to the same extension.
-
-## Signing
-
-For the daily Zen path (signed XPI, persists across restarts):
-
-1. Register an AMO account at https://addons.mozilla.org and create an API key (Tools -> Manage API Keys).
-2. Export credentials:
-   ```sh
-   export AMO_KEY=user:12345:67
-   export AMO_SECRET=...
-   ```
-3. Sign:
-   ```sh
-   npm run extension:sign
-   ```
-   This calls `web-ext sign --channel=unlisted` against `extension/dist/`. Mozilla's automated signer returns a signed `.xpi` in `extension/web-ext-artifacts/`.
-4. Drag the signed XPI into Zen's add-ons page; accept the install prompt. It now persists across Zen restarts.
-
-If you don't want an AMO account: install Firefox Developer Edition, set `xpinstall.signatures.required` to `false` in `about:config`, and load the unsigned XPI there. Daily Zen stays untouched but you trade away the "lives in my actual daily browser" goal.
-
-## Security model
-
-- Daemon binds to `127.0.0.1` only — no remote network exposure.
-- Auth: shared-secret token (32 random bytes, hex-encoded). The first message on every connection must be a `hello` carrying the token; everything else is rejected with a 5s timeout.
-- Tokens are constant-time compared (`crypto.timingSafeEqual`).
-- Token file is mode 0600 in `~/.config/zen-extension-mcp/`.
-
-This protects against unrelated processes on the machine speaking to the extension. It is not a sandbox against the user's own malicious code.
-
-## v1 tool surface
-
-Milestone 1 ships `list_containers` only. The full v1 tool list lands across milestones 2 and 3:
-
-| Bucket | Tools |
-|---|---|
-| **v1 (planned)** | `list_containers`, `set_default_container`, `new_page_in_container`, `list_pages`, `new_page`, `navigate_page`, `select_page`, `close_page`, `navigate_history`, `take_snapshot`, `clear_snapshot`, `click_by_uid`, `hover_by_uid`, `fill_by_uid`, `fill_form_by_uid`, `drag_by_uid_to_uid`, `resolve_uid_to_selector`, `evaluate_script`, `screenshot_page`, `get_firefox_info` |
-| **v2 candidates** | `list_console_messages`, `clear_console_messages`, `list_network_requests`, `get_network_request`, `accept_dialog`, `dismiss_dialog`, `screenshot_by_uid` (degraded fidelity — content-script canvas), full-page screenshot |
-| **Dropped** | `list_privileged_contexts`, `select_privileged_context`, `evaluate_privileged_script`, `set_firefox_prefs`, `get_firefox_prefs`, `restart_firefox`, `upload_file_by_uid`, `install_extension`, `list_extensions`, `uninstall_extension` (no WebExtension equivalent — keep using `zen-mcp`) |
-
-Fidelity gaps to call out:
-- `set_viewport_size` will resize the **window**, not the inner viewport (`browser.windows.update` is the only available knob). If you need exact viewport sizing, use `zen-mcp`.
-- `evaluate_script` requires JSON-serializable args and returns. `scripting.executeScript` enforces this; `zen-mcp`'s Marionette equivalent is more permissive.
+When iterating on extension code with the signed install in production: rebuild + re-sign + remove + reinstall. Use the `npm run extension:sign` script (requires `AMO_KEY` + `AMO_SECRET`).
 
 ## Troubleshooting
 
-**"extension not connected"**: the MCP server is up but the extension isn't talking to the daemon. Open the options page; check the daemon URL and token; check Zen's Browser Console (`Cmd+Shift+J`) for `[zen-ext-mcp]` messages.
+**`extension not connected` from a tool call**: the extension is between reconnect attempts. Check `about:addons` -> Preferences -> status pill. If it says `error`, look at the background console (`about:debugging` -> Inspect on this extension -> Console). Common: token mismatch, daemon not running, port wrong.
 
-**Port collision**: another process is on 8765. Pass `--port 8766` to both the daemon and your MCP server entry, then update the daemon URL in the extension's options page to match.
+**`Missing activeTab permission` on `screenshot_page`**: the host permission isn't granted. Toggle "Access your data for all websites" in the extension's Permissions tab.
 
-**Token rotation**: delete `~/.config/zen-extension-mcp/auth.token` and restart the daemon — it generates a fresh token. Paste the new value into the extension's options page.
+**Storm of "replacing extension connection" in daemon log**: an old buggy version is still running alongside a new one (two background instances both reconnecting and replacing each other). Fully quit Zen and relaunch — should resolve. If it persists, uninstall and reinstall the extension.
+
+**Port collision**: `--port 8766` (or any other free port) on the daemon, then update the extension's options URL.
+
+**Token rotation**: `rm ~/.config/zen-extension-mcp/auth.token` and restart the daemon. Paste the new value into the options page.
+
+## Security model
+
+- Daemon binds 127.0.0.1 only. No remote network exposure.
+- Auth token is the only thing that gates the extension's tool surface from other processes on the same machine. Treat it like any other local credential.
+- The signed extension has `<all_urls>` host permission (gated behind explicit user opt-in for site-data access). It can therefore script any page you visit. Don't grant it lightly.
+- `evaluate_script` runs arbitrary user-provided JS in the page's MAIN world. The MCP token gates who can call it. There is no per-tool permission check beyond auth.
 
 ## License
 

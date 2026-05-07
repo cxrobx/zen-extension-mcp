@@ -4,6 +4,7 @@ import {
   type ContainersListResult,
   type EvaluateScriptResult,
   type FirefoxContainer,
+  type InfoGetResult,
   Methods,
   type NavigateHistoryDirection,
   type NewPageResult,
@@ -22,6 +23,12 @@ import {
 
 export interface ScopeRef {
   current: FirefoxContainer | null;
+}
+
+export interface ServerIdentity {
+  name: string;
+  version: string;
+  daemonUrl: string;
 }
 
 type TextContent = { type: "text"; text: string };
@@ -121,6 +128,7 @@ export function registerTools(
   server: McpServer,
   daemon: DaemonClient,
   scope: ScopeRef,
+  identity: ServerIdentity,
 ): void {
   server.registerTool(
     "list_containers",
@@ -597,6 +605,37 @@ export function registerTools(
         });
         const base64 = dataUrlToBase64(r.dataUrl);
         return okWithImage(`screenshot of tabId=${r.tabId} (${base64.length} bytes base64)`, base64);
+      } catch (err) {
+        return fail(err);
+      }
+    },
+  );
+
+  server.registerTool(
+    "get_firefox_info",
+    {
+      title: "Get Firefox info",
+      description:
+        "Report identity + connection state: MCP server name/version, daemon URL, current container scope (if any), connected extension version, platform, tab/window/container counts.",
+      inputSchema: {},
+    },
+    async () => {
+      try {
+        const r = await daemon.call<InfoGetResult>(Methods.InfoGet);
+        const lines = [
+          `mcp.server: ${identity.name} ${identity.version}`,
+          `mcp.daemonUrl: ${identity.daemonUrl}`,
+          `mcp.scope: ${scope.current ? `${scope.current.name} (${scope.current.cookieStoreId})` : "(none)"}`,
+          `extension.id: ${r.extensionId}`,
+          `extension.version: ${r.extensionVersion}`,
+          `extension.platform: ${r.platform}`,
+          `extension.userAgent: ${r.userAgent}`,
+          `protocolVersion: ${r.protocolVersion}`,
+          `windows: ${r.windowCount}`,
+          `tabs: ${r.tabCount}`,
+          `containers: ${r.containerCount}`,
+        ];
+        return ok(lines.join("\n"));
       } catch (err) {
         return fail(err);
       }
