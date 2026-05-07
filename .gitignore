@@ -1,0 +1,14 @@
+node_modules/
+dist/
+build/
+*.log
+.DS_Store
+.env
+.env.local
+extension/web-ext-artifacts/
+extension/dist/
+*.xpi
+.vscode/
+.idea/
+coverage/
+*.tsbuildinfo

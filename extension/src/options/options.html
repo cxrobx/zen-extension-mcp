@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Zen Extension MCP Bridge</title>
+    <link rel="stylesheet" href="options.css" />
+  </head>
+  <body>
+    <main>
+      <h1>Zen Extension MCP Bridge</h1>
+      <p class="subtitle">
+        Connects this browser to the zen-extension-mcp daemon over a localhost WebSocket.
+      </p>
+
+      <section>
+        <label for="daemonUrl">Daemon URL</label>
+        <input id="daemonUrl" type="text" placeholder="ws://127.0.0.1:8765" />
+      </section>
+
+      <section>
+        <label for="token">Auth token</label>
+        <textarea id="token" rows="3" placeholder="paste contents of ~/.config/zen-extension-mcp/auth.token"></textarea>
+        <p class="hint">
+          The daemon writes this file on first launch with mode 0600. Open it in a terminal:
+          <code>cat ~/.config/zen-extension-mcp/auth.token</code>
+        </p>
+      </section>
+
+      <section class="actions">
+        <button id="save" type="button">Save</button>
+        <span id="status" class="status">unknown</span>
+      </section>
+
+      <footer>
+        <small>Connection state updates live; saving triggers a reconnect.</small>
+      </footer>
+    </main>
+    <script src="options.js"></script>
+  </body>
+</html>
