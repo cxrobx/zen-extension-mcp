@@ -86,3 +86,90 @@ export interface NavigateHistoryParams {
 export interface TabIdResult {
   tabId: number;
 }
+
+export interface SnapshotUidEntry {
+  uid: string;
+  css: string;
+  xpath?: string;
+}
+
+export interface SnapshotNode {
+  uid: string;
+  tag: string;
+  role?: string;
+  name?: string;
+  value?: string;
+  href?: string;
+  src?: string;
+  text?: string;
+  isIframe?: boolean;
+  frameSrc?: string;
+  crossOrigin?: boolean;
+  aria?: Record<string, unknown>;
+  computed?: Record<string, unknown>;
+  children: SnapshotNode[];
+}
+
+export interface TakeSnapshotParams {
+  tabId: number;
+  selector?: string;
+  includeAll?: boolean;
+  includeIframes?: boolean;
+}
+
+export interface TakeSnapshotResult {
+  tabId: number;
+  snapshotId: number;
+  tree: SnapshotNode | null;
+  uidMap: SnapshotUidEntry[];
+  truncated: boolean;
+  selectorError?: string;
+}
+
+export interface ClearSnapshotParams {
+  tabId: number;
+}
+
+export interface UidActionParams {
+  tabId: number;
+  uid: string;
+}
+
+export interface FillParams extends UidActionParams {
+  value: string;
+}
+
+export interface FillFormParams {
+  tabId: number;
+  fields: Array<{ uid: string; value: string }>;
+}
+
+export interface DragParams {
+  tabId: number;
+  fromUid: string;
+  toUid: string;
+}
+
+export interface ResolveUidResult {
+  uid: string;
+  css: string;
+  xpath?: string;
+}
+
+export interface EvaluateScriptParams {
+  tabId: number;
+  code: string;
+}
+
+export interface EvaluateScriptResult {
+  result: unknown;
+}
+
+export interface ScreenshotPageParams {
+  tabId: number;
+}
+
+export interface ScreenshotPageResult {
+  tabId: number;
+  dataUrl: string;
+}

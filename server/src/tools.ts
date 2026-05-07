@@ -2,12 +2,17 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import {
   type ContainersListResult,
+  type EvaluateScriptResult,
   type FirefoxContainer,
   Methods,
   type NavigateHistoryDirection,
   type NewPageResult,
   type PageInfo,
   type PagesListResult,
+  type ResolveUidResult,
+  type ScreenshotPageResult,
+  type SnapshotNode,
+  type TakeSnapshotResult,
 } from "@zen-ext-mcp/shared";
 import type { DaemonClient } from "./daemon-client.js";
 import {
@@ -19,18 +24,59 @@ export interface ScopeRef {
   current: FirefoxContainer | null;
 }
 
+type TextContent = { type: "text"; text: string };
+type ImageContent = { type: "image"; data: string; mimeType: string };
 type ToolResponse = {
   isError?: boolean;
-  content: Array<{ type: "text"; text: string }>;
+  content: Array<TextContent | ImageContent>;
 };
 
 function ok(text: string): ToolResponse {
   return { content: [{ type: "text", text }] };
 }
 
+function okWithImage(text: string, base64Png: string): ToolResponse {
+  return {
+    content: [
+      { type: "text", text },
+      { type: "image", data: base64Png, mimeType: "image/png" },
+    ],
+  };
+}
+
 function fail(err: unknown): ToolResponse {
   const message = err instanceof Error ? err.message : String(err);
   return { isError: true, content: [{ type: "text", text: message }] };
+}
+
+async function resolvePageIdx(daemon: DaemonClient, pageIdx: number): Promise<PageInfo> {
+  const pages = await listPages(daemon);
+  const page = pages[pageIdx];
+  if (!page) {
+    throw new Error(`pageIdx ${pageIdx} out of range; ${pages.length} pages currently open`);
+  }
+  return page;
+}
+
+function formatSnapshotTree(node: SnapshotNode | null, indent = 0): string {
+  if (!node) return "(empty tree)";
+  const pad = "  ".repeat(indent);
+  const parts: string[] = [`${node.tag}#${node.uid}`];
+  if (node.role) parts.push(`role=${node.role}`);
+  if (node.name) parts.push(`name=${JSON.stringify(node.name)}`);
+  if (node.text) parts.push(`text=${JSON.stringify(node.text)}`);
+  if (node.value) parts.push(`value=${JSON.stringify(node.value)}`);
+  if (node.href) parts.push(`href=${node.href}`);
+  if (node.isIframe) parts.push(node.crossOrigin ? "iframe(cross-origin)" : "iframe");
+  const lines = [`${pad}${parts.join(" ")}`];
+  for (const child of node.children) lines.push(formatSnapshotTree(child, indent + 1));
+  return lines.join("\n");
+}
+
+function dataUrlToBase64(dataUrl: string): string {
+  const idx = dataUrl.indexOf(",");
+  if (idx === -1) return dataUrl;
+  return dataUrl.slice(idx + 1);
 }
 
 function sortedPages(pages: PageInfo[]): PageInfo[] {
@@ -308,6 +354,249 @@ export function registerTools(
           direction: dir,
         });
         return ok(`tabId=${page.tabId} ${direction}`);
+      } catch (err) {
+        return fail(err);
+      }
+    },
+  );
+
+  server.registerTool(
+    "take_snapshot",
+    {
+      title: "Take DOM snapshot",
+      description:
+        "Capture a structured DOM snapshot of the page at pageIdx. Returns a tree with stable UIDs that other DOM tools accept. UIDs are scoped to (tabId, snapshotId) and persist until the next take_snapshot, navigation, or clear_snapshot.",
+      inputSchema: {
+        pageIdx: z.number().int().nonnegative(),
+        selector: z.string().optional().describe("Optional CSS selector to scope the snapshot root"),
+        includeAll: z
+          .boolean()
+          .optional()
+          .describe("Include all visible elements, not just the relevance-filtered set"),
+        includeIframes: z.boolean().optional(),
+      },
+    },
+    async ({ pageIdx, selector, includeAll, includeIframes }) => {
+      try {
+        const page = await resolvePageIdx(daemon, pageIdx);
+        const params: Record<string, unknown> = { tabId: page.tabId };
+        if (selector !== undefined) params.selector = selector;
+        if (includeAll !== undefined) params.includeAll = includeAll;
+        if (includeIframes !== undefined) params.includeIframes = includeIframes;
+        const r = await daemon.call<TakeSnapshotResult>(Methods.DomTakeSnapshot, params);
+        if (r.selectorError) return fail(new Error(r.selectorError));
+        const header = `snapshot ${r.snapshotId} for tabId=${r.tabId} (${r.uidMap.length} UIDs${r.truncated ? ", truncated" : ""})`;
+        return ok(`${header}\n${formatSnapshotTree(r.tree)}`);
+      } catch (err) {
+        return fail(err);
+      }
+    },
+  );
+
+  server.registerTool(
+    "clear_snapshot",
+    {
+      title: "Clear DOM snapshot",
+      description: "Drop the cached snapshot for the page at pageIdx.",
+      inputSchema: { pageIdx: z.number().int().nonnegative() },
+    },
+    async ({ pageIdx }) => {
+      try {
+        const page = await resolvePageIdx(daemon, pageIdx);
+        await daemon.call(Methods.DomClearSnapshot, { tabId: page.tabId });
+        return ok(`cleared snapshot for tabId=${page.tabId}`);
+      } catch (err) {
+        return fail(err);
+      }
+    },
+  );
+
+  server.registerTool(
+    "click_by_uid",
+    {
+      title: "Click by UID",
+      description: "Click the element with the given UID from the most recent snapshot of the page.",
+      inputSchema: {
+        pageIdx: z.number().int().nonnegative(),
+        uid: z.string().describe("UID from take_snapshot"),
+      },
+    },
+    async ({ pageIdx, uid }) => {
+      try {
+        const page = await resolvePageIdx(daemon, pageIdx);
+        await daemon.call(Methods.DomClick, { tabId: page.tabId, uid });
+        return ok(`clicked uid=${uid} on tabId=${page.tabId}`);
+      } catch (err) {
+        return fail(err);
+      }
+    },
+  );
+
+  server.registerTool(
+    "hover_by_uid",
+    {
+      title: "Hover by UID",
+      description: "Dispatch mouseover + mouseenter on the element at UID.",
+      inputSchema: {
+        pageIdx: z.number().int().nonnegative(),
+        uid: z.string(),
+      },
+    },
+    async ({ pageIdx, uid }) => {
+      try {
+        const page = await resolvePageIdx(daemon, pageIdx);
+        await daemon.call(Methods.DomHover, { tabId: page.tabId, uid });
+        return ok(`hovered uid=${uid} on tabId=${page.tabId}`);
+      } catch (err) {
+        return fail(err);
+      }
+    },
+  );
+
+  server.registerTool(
+    "fill_by_uid",
+    {
+      title: "Fill by UID",
+      description:
+        "Set the value on an input/textarea/contenteditable element identified by UID. Dispatches input + change events.",
+      inputSchema: {
+        pageIdx: z.number().int().nonnegative(),
+        uid: z.string(),
+        value: z.string(),
+      },
+    },
+    async ({ pageIdx, uid, value }) => {
+      try {
+        const page = await resolvePageIdx(daemon, pageIdx);
+        await daemon.call(Methods.DomFill, { tabId: page.tabId, uid, value });
+        return ok(`filled uid=${uid} on tabId=${page.tabId}`);
+      } catch (err) {
+        return fail(err);
+      }
+    },
+  );
+
+  server.registerTool(
+    "fill_form_by_uid",
+    {
+      title: "Fill form by UID",
+      description:
+        "Fill multiple form fields in one call. Each field is { uid, value }. All fields must resolve from the current snapshot or the call errors.",
+      inputSchema: {
+        pageIdx: z.number().int().nonnegative(),
+        fields: z.array(z.object({ uid: z.string(), value: z.string() })),
+      },
+    },
+    async ({ pageIdx, fields }) => {
+      try {
+        const page = await resolvePageIdx(daemon, pageIdx);
+        await daemon.call(Methods.DomFillForm, { tabId: page.tabId, fields });
+        return ok(`filled ${fields.length} fields on tabId=${page.tabId}`);
+      } catch (err) {
+        return fail(err);
+      }
+    },
+  );
+
+  server.registerTool(
+    "drag_by_uid_to_uid",
+    {
+      title: "Drag by UID to UID",
+      description:
+        "Synthetic drag from one element to another. Dispatches dragstart, dragenter, dragover, drop, dragend with a shared DataTransfer.",
+      inputSchema: {
+        pageIdx: z.number().int().nonnegative(),
+        fromUid: z.string(),
+        toUid: z.string(),
+      },
+    },
+    async ({ pageIdx, fromUid, toUid }) => {
+      try {
+        const page = await resolvePageIdx(daemon, pageIdx);
+        await daemon.call(Methods.DomDrag, {
+          tabId: page.tabId,
+          fromUid,
+          toUid,
+        });
+        return ok(`dragged ${fromUid} -> ${toUid} on tabId=${page.tabId}`);
+      } catch (err) {
+        return fail(err);
+      }
+    },
+  );
+
+  server.registerTool(
+    "resolve_uid_to_selector",
+    {
+      title: "Resolve UID to selector",
+      description: "Look up the CSS selector for a UID from the current snapshot.",
+      inputSchema: {
+        pageIdx: z.number().int().nonnegative(),
+        uid: z.string(),
+      },
+    },
+    async ({ pageIdx, uid }) => {
+      try {
+        const page = await resolvePageIdx(daemon, pageIdx);
+        const r = await daemon.call<ResolveUidResult>(Methods.DomResolveUidToSelector, {
+          tabId: page.tabId,
+          uid,
+        });
+        const xpathLine = r.xpath ? `\nxpath=${r.xpath}` : "";
+        return ok(`uid=${r.uid}\ncss=${r.css}${xpathLine}`);
+      } catch (err) {
+        return fail(err);
+      }
+    },
+  );
+
+  server.registerTool(
+    "evaluate_script",
+    {
+      title: "Evaluate script",
+      description:
+        "Run JavaScript in the page's MAIN world. The provided string is the function body; return a JSON-serializable value with `return ...`. Cannot return DOM nodes or non-serializable objects.",
+      inputSchema: {
+        pageIdx: z.number().int().nonnegative(),
+        code: z.string().describe("Function body. Use `return` to send a value back."),
+      },
+    },
+    async ({ pageIdx, code }) => {
+      try {
+        const page = await resolvePageIdx(daemon, pageIdx);
+        const r = await daemon.call<EvaluateScriptResult>(Methods.DomEvaluate, {
+          tabId: page.tabId,
+          code,
+        });
+        const text =
+          r.result === undefined
+            ? "(undefined)"
+            : typeof r.result === "string"
+              ? r.result
+              : JSON.stringify(r.result, null, 2);
+        return ok(text);
+      } catch (err) {
+        return fail(err);
+      }
+    },
+  );
+
+  server.registerTool(
+    "screenshot_page",
+    {
+      title: "Screenshot page",
+      description:
+        "Capture the visible viewport of the tab at pageIdx as PNG. Note: WebExtension API can only capture the *active* tab in its window — call select_page first if necessary.",
+      inputSchema: { pageIdx: z.number().int().nonnegative() },
+    },
+    async ({ pageIdx }) => {
+      try {
+        const page = await resolvePageIdx(daemon, pageIdx);
+        const r = await daemon.call<ScreenshotPageResult>(Methods.PagesScreenshot, {
+          tabId: page.tabId,
+        });
+        const base64 = dataUrlToBase64(r.dataUrl);
+        return okWithImage(`screenshot of tabId=${r.tabId} (${base64.length} bytes base64)`, base64);
       } catch (err) {
         return fail(err);
       }

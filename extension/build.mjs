@@ -12,7 +12,11 @@ if (existsSync(outDir)) await rm(outDir, { recursive: true, force: true });
 await mkdir(outDir, { recursive: true });
 
 await build({
-  entryPoints: [join(srcDir, "background.ts"), join(srcDir, "options/options.ts")],
+  entryPoints: [
+    join(srcDir, "background.ts"),
+    join(srcDir, "options/options.ts"),
+    join(srcDir, "snapshot/inject.ts"),
+  ],
   outdir: outDir,
   bundle: true,
   format: "iife",
