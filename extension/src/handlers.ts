@@ -141,40 +141,6 @@ function requireLocatorParams(raw: unknown): { tabId: number; locator: LocatorSp
   return { tabId, locator };
 }
 
-async function runOnLocator(
-  tabId: number,
-  locator: LocatorSpec,
-  fn: (...args: unknown[]) => unknown,
-  extraArgs: unknown[] = [],
-): Promise<void> {
-  await executeInMain(
-    tabId,
-    (loc, body, args) => {
-      const findEl = (l: LocatorSpec): Element | null => {
-        if (l.kind === "css") return document.querySelector(l.selector);
-        const r = document.evaluate(
-          l.expression,
-          document,
-          null,
-          XPathResult.FIRST_ORDERED_NODE_TYPE,
-          null,
-        );
-        return r.singleNodeValue as Element | null;
-      };
-      const el = findEl(loc as LocatorSpec);
-      if (!el) {
-        const ls = loc as LocatorSpec;
-        throw new Error(
-          `element not found: ${ls.kind === "css" ? ls.selector : ls.expression}`,
-        );
-      }
-      const f = body as (...a: unknown[]) => unknown;
-      return f(el, ...(args as unknown[]));
-    },
-    [locator, fn, extraArgs],
-  );
-}
-
 function toCookieEntry(c: browser.cookies.Cookie): CookieEntry {
   const entry: CookieEntry = { name: c.name, value: c.value };
   if (c.domain) entry.domain = c.domain;
@@ -503,18 +469,58 @@ export const handlers: Record<string, Handler> = {
 
   [Methods.DomClickByLocator]: async (raw): Promise<TabIdResult> => {
     const { tabId, locator } = requireLocatorParams(raw);
-    await runOnLocator(tabId, locator, (el) => {
-      (el as HTMLElement).click();
-    });
+    await executeInMain(
+      tabId,
+      (loc) => {
+        const l = loc as LocatorSpec;
+        const el =
+          l.kind === "css"
+            ? document.querySelector(l.selector)
+            : (document.evaluate(
+                l.expression,
+                document,
+                null,
+                XPathResult.FIRST_ORDERED_NODE_TYPE,
+                null,
+              ).singleNodeValue as Element | null);
+        if (!el) {
+          throw new Error(
+            `element not found: ${l.kind === "css" ? l.selector : l.expression}`,
+          );
+        }
+        (el as HTMLElement).click();
+      },
+      [locator],
+    );
     return { tabId };
   },
 
   [Methods.DomHoverByLocator]: async (raw): Promise<TabIdResult> => {
     const { tabId, locator } = requireLocatorParams(raw);
-    await runOnLocator(tabId, locator, (el) => {
-      el.dispatchEvent(new MouseEvent("mouseover", { bubbles: true }));
-      el.dispatchEvent(new MouseEvent("mouseenter", { bubbles: true }));
-    });
+    await executeInMain(
+      tabId,
+      (loc) => {
+        const l = loc as LocatorSpec;
+        const el =
+          l.kind === "css"
+            ? document.querySelector(l.selector)
+            : (document.evaluate(
+                l.expression,
+                document,
+                null,
+                XPathResult.FIRST_ORDERED_NODE_TYPE,
+                null,
+              ).singleNodeValue as Element | null);
+        if (!el) {
+          throw new Error(
+            `element not found: ${l.kind === "css" ? l.selector : l.expression}`,
+          );
+        }
+        el.dispatchEvent(new MouseEvent("mouseover", { bubbles: true }));
+        el.dispatchEvent(new MouseEvent("mouseenter", { bubbles: true }));
+      },
+      [locator],
+    );
     return { tabId };
   },
 
@@ -523,22 +529,42 @@ export const handlers: Record<string, Handler> = {
     const { tabId, locator } = requireLocatorParams(params);
     if (typeof params.value !== "string") throw new Error("value must be a string");
     const value = params.value;
-    await runOnLocator(tabId, locator, (el, val) => {
-      const input = el as HTMLInputElement | HTMLTextAreaElement;
-      if ("value" in input) {
-        const proto = Object.getPrototypeOf(input);
-        const desc = Object.getOwnPropertyDescriptor(proto, "value");
-        if (desc?.set) desc.set.call(input, val as string);
-        else input.value = val as string;
-        input.dispatchEvent(new Event("input", { bubbles: true }));
-        input.dispatchEvent(new Event("change", { bubbles: true }));
-      } else if ((el as HTMLElement).isContentEditable) {
-        el.textContent = val as string;
-        el.dispatchEvent(new Event("input", { bubbles: true }));
-      } else {
-        throw new Error("element is not fillable");
-      }
-    }, [value]);
+    await executeInMain(
+      tabId,
+      (loc, val) => {
+        const l = loc as LocatorSpec;
+        const el =
+          l.kind === "css"
+            ? document.querySelector(l.selector)
+            : (document.evaluate(
+                l.expression,
+                document,
+                null,
+                XPathResult.FIRST_ORDERED_NODE_TYPE,
+                null,
+              ).singleNodeValue as Element | null);
+        if (!el) {
+          throw new Error(
+            `element not found: ${l.kind === "css" ? l.selector : l.expression}`,
+          );
+        }
+        const input = el as HTMLInputElement | HTMLTextAreaElement;
+        if ("value" in input) {
+          const proto = Object.getPrototypeOf(input);
+          const desc = Object.getOwnPropertyDescriptor(proto, "value");
+          if (desc?.set) desc.set.call(input, val as string);
+          else input.value = val as string;
+          input.dispatchEvent(new Event("input", { bubbles: true }));
+          input.dispatchEvent(new Event("change", { bubbles: true }));
+        } else if ((el as HTMLElement).isContentEditable) {
+          el.textContent = val as string;
+          el.dispatchEvent(new Event("input", { bubbles: true }));
+        } else {
+          throw new Error("element is not fillable");
+        }
+      },
+      [locator, value],
+    );
     return { tabId };
   },
 
@@ -549,11 +575,27 @@ export const handlers: Record<string, Handler> = {
     const text = params.text;
     const delayMs = typeof params.delayMs === "number" ? params.delayMs : 0;
     const clearFirst = params.clearFirst === true;
-    await runOnLocator(
+    await executeInMain(
       tabId,
-      locator,
-      async (el, t, delay, clear) => {
+      async (loc, t, delay, clear) => {
+        const l = loc as LocatorSpec;
+        const el =
+          l.kind === "css"
+            ? document.querySelector(l.selector)
+            : (document.evaluate(
+                l.expression,
+                document,
+                null,
+                XPathResult.FIRST_ORDERED_NODE_TYPE,
+                null,
+              ).singleNodeValue as Element | null);
+        if (!el) {
+          throw new Error(
+            `element not found: ${l.kind === "css" ? l.selector : l.expression}`,
+          );
+        }
         const input = el as HTMLInputElement | HTMLTextAreaElement;
+        const focusable = el as HTMLElement;
         if (clear === true && "value" in input) {
           const proto = Object.getPrototypeOf(input);
           const desc = Object.getOwnPropertyDescriptor(proto, "value");
@@ -561,7 +603,6 @@ export const handlers: Record<string, Handler> = {
           else input.value = "";
           input.dispatchEvent(new Event("input", { bubbles: true }));
         }
-        const focusable = el as HTMLElement;
         if (typeof focusable.focus === "function") focusable.focus();
         const str = t as string;
         const d = typeof delay === "number" ? delay : 0;
@@ -583,7 +624,9 @@ export const handlers: Record<string, Handler> = {
             input.dispatchEvent(new InputEvent("input", { bubbles: true, data: ch }));
           } else if (focusable.isContentEditable) {
             focusable.textContent = (focusable.textContent ?? "") + ch;
-            focusable.dispatchEvent(new InputEvent("input", { bubbles: true, data: ch }));
+            focusable.dispatchEvent(
+              new InputEvent("input", { bubbles: true, data: ch }),
+            );
           }
           el.dispatchEvent(new KeyboardEvent("keyup", { key, bubbles: true }));
           if (d > 0) await new Promise((r) => setTimeout(r, d));
@@ -592,7 +635,7 @@ export const handlers: Record<string, Handler> = {
           input.dispatchEvent(new Event("change", { bubbles: true }));
         }
       },
-      [text, delayMs, clearFirst],
+      [locator, text, delayMs, clearFirst],
     );
     return { tabId };
   },
@@ -709,10 +752,18 @@ export const handlers: Record<string, Handler> = {
           return r.singleNodeValue as Element | null;
         };
         const t = tgt as PressKeyParams["target"];
-        const el: Element =
-          t.kind === "locator"
-            ? findEl(t.locator) ?? document.activeElement ?? document.body
-            : document.activeElement ?? document.body;
+        let el: Element | null;
+        if (t.kind === "locator") {
+          el = findEl(t.locator);
+          if (!el) {
+            const loc = t.locator;
+            throw new Error(
+              `element not found: ${loc.kind === "css" ? loc.selector : loc.expression}`,
+            );
+          }
+        } else {
+          el = document.activeElement ?? document.body;
+        }
         const spec = k as string;
         const parts = spec.split("+").map((p) => p.trim());
         const SPECIAL: Record<string, string> = {
@@ -802,6 +853,11 @@ export const handlers: Record<string, Handler> = {
 
   [Methods.CookiesClear]: async (raw): Promise<ClearCookiesResult> => {
     const params = (raw as ClearCookiesParams) ?? {};
+    if (!params.url && !params.name && !params.domain && !params.storeId) {
+      throw new Error(
+        "clear_cookies requires at least one of: url, name, domain, storeId. Refusing to wipe all cookies.",
+      );
+    }
     const details: browser.cookies._GetAllDetailsType = {};
     if (params.url) details.url = params.url;
     if (params.name) details.name = params.name;
