@@ -13,7 +13,10 @@
     "@zen-ext-mcp/shared": "*"
   },
   "devDependencies": {
+    "@mozilla/readability": "^0.6.0",
     "@types/firefox-webext-browser": "^120.0.4",
+    "@types/turndown": "^5.0.6",
+    "turndown": "^7.2.4",
     "web-ext": "^8.3.0"
   }
 }

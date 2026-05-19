@@ -19,6 +19,21 @@ export const Methods = {
   DomDrag: "dom.drag",
   DomResolveUidToSelector: "dom.resolveUidToSelector",
   DomEvaluate: "dom.evaluate",
+  DomGetPageText: "dom.getPageText",
+  DomReadPage: "dom.readPage",
+  DomClickByLocator: "dom.clickByLocator",
+  DomHoverByLocator: "dom.hoverByLocator",
+  DomFillByLocator: "dom.fillByLocator",
+  DomTypeByLocator: "dom.typeByLocator",
+  DomDragByLocator: "dom.dragByLocator",
+  DomSelectOptionByLocator: "dom.selectOptionByLocator",
+  DomPressKey: "dom.pressKey",
+  CookiesGet: "cookies.get",
+  CookiesSet: "cookies.set",
+  CookiesClear: "cookies.clear",
+  StorageGet: "storage.get",
+  StorageSet: "storage.set",
+  StorageClear: "storage.clear",
   InfoGet: "info.get",
 } as const;
 
@@ -172,6 +187,164 @@ export interface ScreenshotPageParams {
 export interface ScreenshotPageResult {
   tabId: number;
   dataUrl: string;
+}
+
+export interface GetPageTextParams {
+  tabId: number;
+  selector?: string;
+}
+
+export interface GetPageTextResult {
+  text: string;
+}
+
+export interface ReadPageParams {
+  tabId: number;
+}
+
+export interface ReadPageResult {
+  ok: boolean;
+  reason?: string;
+  message?: string;
+  title?: string;
+  byline?: string;
+  excerpt?: string;
+  siteName?: string;
+  length?: number;
+  markdown?: string;
+}
+
+export type LocatorSpec =
+  | { kind: "css"; selector: string }
+  | { kind: "xpath"; expression: string };
+
+export interface LocatorParams {
+  tabId: number;
+  locator: LocatorSpec;
+  timeoutMs?: number;
+}
+
+export interface LocatorActionResult {
+  tabId: number;
+  matchedTag?: string;
+}
+
+export interface FillByLocatorParams extends LocatorParams {
+  value: string;
+}
+
+export interface TypeByLocatorParams extends LocatorParams {
+  text: string;
+  delayMs?: number;
+  clearFirst?: boolean;
+}
+
+export interface DragByLocatorParams {
+  tabId: number;
+  from: LocatorSpec;
+  to: LocatorSpec;
+  timeoutMs?: number;
+}
+
+export type SelectOptionBy = "value" | "label" | "index";
+
+export interface SelectOptionByLocatorParams extends LocatorParams {
+  by: SelectOptionBy;
+  value: string;
+}
+
+export interface SelectOptionResult {
+  ok: boolean;
+  reason?: string;
+  tag?: string;
+  value?: string;
+  label?: string;
+}
+
+export type PressKeyTarget =
+  | { kind: "locator"; locator: LocatorSpec }
+  | { kind: "active" };
+
+export interface PressKeyParams {
+  tabId: number;
+  target: PressKeyTarget;
+  keys: string;
+  timeoutMs?: number;
+}
+
+export interface CookieEntry {
+  name: string;
+  value: string;
+  domain?: string;
+  path?: string;
+  expirationDate?: number;
+  httpOnly?: boolean;
+  secure?: boolean;
+  sameSite?: "no_restriction" | "lax" | "strict";
+  storeId?: string;
+}
+
+export interface GetCookiesParams {
+  url?: string;
+  name?: string;
+  domain?: string;
+  storeId?: string;
+}
+
+export interface GetCookiesResult {
+  cookies: CookieEntry[];
+}
+
+export interface SetCookiesParams {
+  cookies: Array<CookieEntry & { url: string }>;
+}
+
+export interface SetCookiesResult {
+  set: number;
+}
+
+export interface ClearCookiesParams {
+  url?: string;
+  name?: string;
+  domain?: string;
+  storeId?: string;
+}
+
+export interface ClearCookiesResult {
+  deleted: number;
+}
+
+export type StorageKind = "local" | "session";
+
+export interface StorageGetParams {
+  tabId: number;
+  kind: StorageKind;
+  keys?: string[];
+}
+
+export interface StorageGetResult {
+  items: Record<string, string | null>;
+}
+
+export interface StorageSetParams {
+  tabId: number;
+  kind: StorageKind;
+  items: Record<string, string>;
+}
+
+export interface StorageSetResult {
+  written: number;
+}
+
+export interface StorageClearParams {
+  tabId: number;
+  kind: StorageKind;
+  keys?: string[];
+}
+
+export interface StorageClearResult {
+  removed: number;
+  cleared: boolean;
 }
 
 export interface InfoGetResult {
