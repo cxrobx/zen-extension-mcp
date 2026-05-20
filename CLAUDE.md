@@ -47,16 +47,21 @@ For extension changes:
    Pick `max + 0.0.1` and write that into `extension/src/manifest.json`. AMO rejects re-uploads of any previously-signed version, even ones that were deleted locally — the manifest in the repo can lag behind AMO.
 3. `npm run build:extension`
 4. `npm run extension:sign` — uploads to AMO; signing takes 30-90s. Creds come from `~/.config/zen-extension-mcp/.env`; override inline with `AMO_KEY=... AMO_SECRET=... npm run extension:sign` if needed.
-5. **Trigger the install dialog in Zen.** `open file.xpi`, `open -a Zen.app file.xpi`, and launching the Zen binary with the XPI as an argument all silently no-op for installed signed extensions. The reliable path:
+5. **Open the signed XPI in Zen.** Almost always:
+   ```sh
+   open -a "/Applications/Zen.app" extension/web-ext-artifacts/<file>.xpi
+   ```
+   This shows the install banner at the top of the active tab. Click Allow → Add/Update. This is what works in practice.
+6. Confirm the new version in `about:addons` — **in-place upgrades occasionally no-op silently**, especially across larger version jumps. If the version didn't change: `⋯ → Remove` the old version, then re-run the `open -a` command. **Removal wipes `browser.storage.local`**; user has to re-paste daemon URL + token (`cat ~/.config/zen-extension-mcp/auth.token`) and re-toggle "Access your data for all websites" in the Permissions tab.
+7. **Fallback if `open -a` itself silently fails** (rare): serve the XPI over localhost with the right MIME and navigate Zen to it.
    ```sh
    cd extension/web-ext-artifacts && \
      python3 -c "import http.server,socketserver; \
        h=http.server.SimpleHTTPRequestHandler; \
        h.extensions_map['.xpi']='application/x-xpinstall'; \
-       socketserver.TCPServer(('127.0.0.1',8771),h).serve_forever()" &
+       socketserver.TCPServer(('127.0.0.1',8772),h).serve_forever()" &
    ```
-   Then in Zen, navigate to `http://127.0.0.1:8771/<file>.xpi` (any tool that opens a URL works — `mcp__zen-ext__new_page` is fine). Click the "Allow" toast at the top of the browser, then "Update" / "Add" in the resulting dialog. The MIME header is what makes Zen treat it as an installable extension instead of a download.
-6. Confirm the new version in `about:addons` — **in-place upgrades regularly no-op silently**. If the version didn't change: `⋯ → Remove` and re-install via the same flow. **Removal wipes `browser.storage.local`**; user has to re-paste daemon URL + token (`cat ~/.config/zen-extension-mcp/auth.token`) and re-toggle "Access your data for all websites" in the Permissions tab.
+   Then point Zen at `http://127.0.0.1:8772/<file>.xpi`. Don't reach for this first.
 
 For daemon/server/shared changes only: `npm run build` is enough; no extension reinstall needed. Daemon comes back automatically (launchd KeepAlive).
 
@@ -66,7 +71,7 @@ For dev iteration **without** AMO signing: `npm run extension:run` opens a fresh
 
 The AMO signing pipeline is fully wired up and runnable from the CLI. If you find yourself drafting a paragraph for the user about "AMO signing needs API credentials that only you can create" — stop. The credentials already exist at `~/.config/zen-extension-mcp/.env`, `extension/scripts/sign.sh` sources them, and `npm run extension:sign` just works. The previous session burned ~10 minutes lecturing the user before the user told it to actually look. Run the command first; lecture later only if it fails.
 
-Same pattern for the localhost-MIME install trick above — agents tend to try `open`, `open -a Zen.app`, and direct binary launches and conclude installation isn't possible from the CLI. It is. The flow above is the canonical way.
+For installation specifically: `open -a "/Applications/Zen.app" <xpi>` triggers the Zen install banner reliably across versions, ports, and fresh-install vs upgrade. Try that first. Only fall back to the localhost-MIME server flow if `open -a` produces nothing — and remember that "nothing" often means the upgrade silently no-op'd, not that `open` failed; check `about:addons` for the active version before changing approach.
 
 ## Probes (must validate against live Zen)
 
@@ -90,7 +95,7 @@ After any extension change, run the relevant probe(s) — `npm run build` doesn'
 - **Connect must be idempotent and resilient to stale ws.** `connect()` treats CLOSED/CLOSING as null. The keepalive uses `isHealthy()` (`ws.readyState === OPEN`) not the cached state field — state lies after asymmetric WS shutdown.
 - **`evaluate_script`** wraps user code with `new Function(code)()`. User provides function body, uses `return` for the result, must be JSON-serializable. DOM nodes fail.
 - **AMO signing** rejects re-uploads of an already-signed version. Always bump the manifest version, and check AMO for the highest version (curl + jq snippet above) before deciding what to bump to — local artifacts can lag behind what AMO has on file.
-- **In-place extension upgrades silently no-op fairly often.** Always confirm the new version in `about:addons` after install. If stuck, the localhost-XPI-server flow above is the canonical recovery; `open` / `open -a` / direct binary launch all silently fail for already-installed signed extensions.
+- **In-place extension upgrades occasionally no-op silently.** Always confirm the new version in `about:addons` after install. If stuck, remove the existing extension (`⋯ → Remove`) and re-run `open -a "/Applications/Zen.app" <xpi>`; that's reliable for a clean install. The localhost-XPI-server flow (step 7 of the iteration loop) is a deeper fallback if even `open -a` produces nothing.
 
 ## Where things live
 
