@@ -2,6 +2,12 @@
 
 WebExtension-backed MCP for Zen (Firefox). Sister project to `~/Projects/zen-mcp` (Marionette/Selenium). User docs in `README.md`; this file is for an agent working on the codebase.
 
+## You are in the daily driver — never implement new tools in `~/Projects/zen-mcp`
+
+All seven `zen-*` entries in `claude mcp list` point at **this** repo. `~/Projects/zen-mcp` is a Marionette-based escape hatch retained only for privileged-context tools the WebExtension API can't do (`set_firefox_prefs`, `evaluate_privileged_script`, full network response bodies, file uploads). If a task is "add a tool" or "fix a tool used in a Claude Code session", the work goes here.
+
+Before doing anything: `claude mcp list | grep zen` to confirm what's wired up. If you find yourself editing files under `~/Projects/zen-mcp/src/`, you've taken a wrong turn.
+
 ## Three processes, one bridge
 
 ```
@@ -26,22 +32,41 @@ Claude Code  --stdio-->  MCP server (per session, --container-scoped)
 - Daemon: launchd `~/Library/LaunchAgents/io.cxrobx.zen-extension-mcp.daemon.plist` → `/usr/local/bin/node` runs `daemon/dist/index.js --port 8766`. Logs at `~/Library/Logs/zen-extension-mcp/daemon.{out,err}.log`.
 - Extension: signed via AMO unlisted, gecko id `zen-ext-mcp@cxrobx`, currently 0.0.9. Settings (URL + token) live in `browser.storage.local`.
 - Auth token: `~/.config/zen-extension-mcp/auth.token` (mode 0600, 32-byte hex). Daemon generates on first launch.
+- AMO signing creds: `~/.config/zen-extension-mcp/.env` (mode 0600, `AMO_KEY` + `AMO_SECRET`). Sourced by `extension/scripts/sign.sh`; `npm run extension:sign` works with no inline env. Get fresh keys at https://addons.mozilla.org/developers/addon/api/key/.
 - 7 MCP entries at user scope (`~/.claude.json`): `zen-ext`, `zen-cxv`, `zen-personal`, `zen-geek`, `zen-music`, `zen-buildersbuddy`, `zen-artist`.
 
 ## Iteration loop (it's slow — minimize cycles)
 
 For extension changes:
 1. Edit `extension/src/...`
-2. Bump `extension/src/manifest.json` version (AMO rejects same-version uploads)
+2. **Check AMO for the highest published version before bumping**:
+   ```sh
+   curl -s https://addons.mozilla.org/api/v5/addons/addon/zen-ext-mcp@cxrobx/versions/ \
+     | jq -r '.results[].version' | head -5
+   ```
+   Pick `max + 0.0.1` and write that into `extension/src/manifest.json`. AMO rejects re-uploads of any previously-signed version, even ones that were deleted locally — the manifest in the repo can lag behind AMO.
 3. `npm run build:extension`
-4. `AMO_KEY=... AMO_SECRET=... npm run extension:sign` — uploads to AMO; signing takes 30-90s
-5. Open the resulting `extension/web-ext-artifacts/*.xpi` in Zen
-6. **In-place upgrade is flaky** — sometimes silently no-ops. Check `about:addons` to confirm the new version is active. If not: `⋯ → Remove`, then re-install. **Removal wipes `browser.storage.local`** so you'll re-paste daemon URL + token.
-7. Re-grant the "Access your data for all websites" toggle if `screenshot_page` is involved (lost on remove)
+4. `npm run extension:sign` — uploads to AMO; signing takes 30-90s. Creds come from `~/.config/zen-extension-mcp/.env`; override inline with `AMO_KEY=... AMO_SECRET=... npm run extension:sign` if needed.
+5. **Trigger the install dialog in Zen.** `open file.xpi`, `open -a Zen.app file.xpi`, and launching the Zen binary with the XPI as an argument all silently no-op for installed signed extensions. The reliable path:
+   ```sh
+   cd extension/web-ext-artifacts && \
+     python3 -c "import http.server,socketserver; \
+       h=http.server.SimpleHTTPRequestHandler; \
+       h.extensions_map['.xpi']='application/x-xpinstall'; \
+       socketserver.TCPServer(('127.0.0.1',8771),h).serve_forever()" &
+   ```
+   Then in Zen, navigate to `http://127.0.0.1:8771/<file>.xpi` (any tool that opens a URL works — `mcp__zen-ext__new_page` is fine). Click the "Allow" toast at the top of the browser, then "Update" / "Add" in the resulting dialog. The MIME header is what makes Zen treat it as an installable extension instead of a download.
+6. Confirm the new version in `about:addons` — **in-place upgrades regularly no-op silently**. If the version didn't change: `⋯ → Remove` and re-install via the same flow. **Removal wipes `browser.storage.local`**; user has to re-paste daemon URL + token (`cat ~/.config/zen-extension-mcp/auth.token`) and re-toggle "Access your data for all websites" in the Permissions tab.
 
 For daemon/server/shared changes only: `npm run build` is enough; no extension reinstall needed. Daemon comes back automatically (launchd KeepAlive).
 
 For dev iteration **without** AMO signing: `npm run extension:run` opens a fresh Firefox profile with `extension/dist/` loaded as a temporary add-on. Gone after profile close.
+
+## Don't talk yourself out of the easy path
+
+The AMO signing pipeline is fully wired up and runnable from the CLI. If you find yourself drafting a paragraph for the user about "AMO signing needs API credentials that only you can create" — stop. The credentials already exist at `~/.config/zen-extension-mcp/.env`, `extension/scripts/sign.sh` sources them, and `npm run extension:sign` just works. The previous session burned ~10 minutes lecturing the user before the user told it to actually look. Run the command first; lecture later only if it fails.
+
+Same pattern for the localhost-MIME install trick above — agents tend to try `open`, `open -a Zen.app`, and direct binary launches and conclude installation isn't possible from the CLI. It is. The flow above is the canonical way.
 
 ## Probes (must validate against live Zen)
 
@@ -64,29 +89,46 @@ After any extension change, run the relevant probe(s) — `npm run build` doesn'
 - **MV3 backgrounds suspend** after ~80s of "idle" in Firefox 147 even with active WebSockets. The 30s `browser.alarms` keepalive (already shipped in 0.0.8/0.0.9) keeps the background alive AND force-reconnects when `ws.readyState !== OPEN`. **Don't remove this** without a replacement strategy.
 - **Connect must be idempotent and resilient to stale ws.** `connect()` treats CLOSED/CLOSING as null. The keepalive uses `isHealthy()` (`ws.readyState === OPEN`) not the cached state field — state lies after asymmetric WS shutdown.
 - **`evaluate_script`** wraps user code with `new Function(code)()`. User provides function body, uses `return` for the result, must be JSON-serializable. DOM nodes fail.
-- **AMO signing** rejects re-uploads of an already-signed version. Always bump the manifest version.
+- **AMO signing** rejects re-uploads of an already-signed version. Always bump the manifest version, and check AMO for the highest version (curl + jq snippet above) before deciding what to bump to — local artifacts can lag behind what AMO has on file.
+- **In-place extension upgrades silently no-op fairly often.** Always confirm the new version in `about:addons` after install. If stuck, the localhost-XPI-server flow above is the canonical recovery; `open` / `open -a` / direct binary launch all silently fail for already-installed signed extensions.
 
 ## Where things live
 
 | What | Where |
 |---|---|
 | RPC types + method names | `shared/src/methods.ts`, `shared/src/protocol.ts` |
+| Error codes + `ZenToolError` | `shared/src/errors.ts`, `server/src/errors.ts` |
 | Daemon WS routing + auth | `daemon/src/index.ts` |
 | MCP tool registrations | `server/src/tools.ts` |
+| Locator-prefix parser (`css:`/`xpath:`/`text:`/`text*:`/`role:`) | `server/src/locator.ts` |
 | Container resolver (ported from `zen-mcp`) | `server/src/container.ts` |
 | Daemon WS client (used by MCP server) | `server/src/daemon-client.ts` |
-| Extension RPC handlers (pages.*, dom.*, etc.) | `extension/src/handlers.ts` |
+| Extension RPC handlers (pages.*, dom.*, cookies, storage, etc.) | `extension/src/handlers.ts` |
 | Extension WS client + reconnect/heartbeat | `extension/src/connection.ts` |
 | Snapshot port (treeWalker, selectors, attrs) | `extension/src/snapshot/` |
+| Bundled Readability for `read_page` (~112KB, injected) | `extension/src/readability-bundle.js` |
 | Background entrypoint + keepalive | `extension/src/background.ts` |
 | Options page | `extension/src/options/` |
+| AMO sign wrapper that sources `.env` | `extension/scripts/sign.sh` |
 
-## Things deliberately NOT done in v1
+## Things deliberately NOT done
 
-- Console / network / dialog tools — content-script bridges with degraded fidelity. Plan calls these out as v2.
-- Privileged-context tools — fundamental WebExtension capability gap. Use `~/Projects/zen-mcp` for those.
-- File upload by UID — browser security blocks it from any extension.
-- Multi-window support is implicit (tab.windowId in PageInfo) but no window-management tools.
+Still gaps as of this writing:
+
+- **Console messages**, **dialog handling** (`accept_dialog` / `dismiss_dialog`), **full network response bodies**. Content-script bridges with degraded fidelity. Still v2.
+- **Privileged-context tools** — fundamental WebExtension capability gap. Use `~/Projects/zen-mcp` for those.
+- **File upload by UID** — browser security blocks it from any extension.
+- **Multi-window management** — `tab.windowId` flows through `PageInfo` but there are no window-level tools (focus, move, resize).
+
+Already done (was deferred in the original plan but landed since):
+
+- `read_page` via bundled Readability + Turndown.
+- Cookies (`get_cookies` / `set_cookies` / `clear_cookies`).
+- Local + session storage (`get_storage` / `set_storage` / `clear_storage`).
+- Network interception with `urlPattern` / `mimeType` filters, block + mock.
+- `save_pdf` + `export_har` for page archival.
+- Locator-prefix support (`css:`, `xpath:`, `text:`, `text*:`, `role:`) across `click`, `hover`, `fill`, etc. — the `_by_uid` family still works as the snapshot path; the unprefixed/prefixed variants are the Playwright-style fast path.
+- `get_page_text`, `find_by_text`, `wait_for`, `press_key`, `type`, `select_option`.
 
 If you're adding any of these, double-check the README's "Tool surface" table and update both there and here.
 
