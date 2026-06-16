@@ -68,6 +68,7 @@ export interface PagesListResult {
 export interface NewPageParams {
   url: string;
   cookieStoreId?: string;
+  active?: boolean;
 }
 
 export interface NewPageResult {

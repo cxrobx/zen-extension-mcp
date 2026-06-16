@@ -224,14 +224,19 @@ export function registerTools(
     {
       title: "New page",
       description:
-        "Open a new tab at URL. Uses the current default container if one is set (via --container or set_default_container).",
+        "Open a new tab at URL. Opens in the background by default (does not steal focus); pass active=true to foreground it. Uses the current default container if one is set (via --container or set_default_container).",
       inputSchema: {
         url: z.string().describe("Target URL"),
+        active: z
+          .boolean()
+          .optional()
+          .describe("Foreground the new tab. Default false: opens in the background without stealing focus."),
       },
     },
-    async ({ url }) => {
+    async ({ url, active }) => {
       try {
-        const params: { url: string; cookieStoreId?: string } = { url };
+        const params: { url: string; cookieStoreId?: string; active?: boolean } = { url };
+        if (active !== undefined) params.active = active;
         if (scope.current) params.cookieStoreId = scope.current.cookieStoreId;
         const r = await daemon.call<NewPageResult>(Methods.PagesNew, params);
         const cn = r.containerName ?? "no container";
@@ -247,19 +252,25 @@ export function registerTools(
     {
       title: "New page in container",
       description:
-        "Open a new tab at URL in the named Firefox container. Independent of the default container scope.",
+        "Open a new tab at URL in the named Firefox container. Independent of the default container scope. Opens in the background by default (does not steal focus); pass active=true to foreground it.",
       inputSchema: {
         name: z.string().describe("Exact Firefox container name"),
         url: z.string().describe("Target URL"),
+        active: z
+          .boolean()
+          .optional()
+          .describe("Foreground the new tab. Default false: opens in the background without stealing focus."),
       },
     },
-    async ({ name, url }) => {
+    async ({ name, url, active }) => {
       try {
         const container = await resolveScopeContainer(daemon, name);
-        const r = await daemon.call<NewPageResult>(Methods.PagesNew, {
+        const params: { url: string; cookieStoreId: string; active?: boolean } = {
           url,
           cookieStoreId: container.cookieStoreId,
-        });
+        };
+        if (active !== undefined) params.active = active;
+        const r = await daemon.call<NewPageResult>(Methods.PagesNew, params);
         return ok(`new page tabId=${r.tabId} -> ${r.url} (${container.name})`);
       } catch (err) {
         return fail(err);
@@ -621,7 +632,7 @@ export function registerTools(
     {
       title: "Screenshot page",
       description:
-        "Capture the visible viewport of the tab at pageIdx as PNG. Note: WebExtension API can only capture the *active* tab in its window — call select_page first if necessary.",
+        "Capture the visible viewport of the tab at pageIdx as PNG. Captures the tab in place without activating it or changing window focus.",
       inputSchema: { pageIdx: z.number().int().nonnegative() },
     },
     async ({ pageIdx }) => {

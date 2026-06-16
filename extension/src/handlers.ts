@@ -177,7 +177,7 @@ export const handlers: Record<string, Handler> = {
   [Methods.PagesNew]: async (raw): Promise<NewPageResult> => {
     const params = raw as NewPageParams;
     const url = requireString(params?.url, "url");
-    const createOpts: browser.tabs._CreateCreateProperties = { url, active: true };
+    const createOpts: browser.tabs._CreateCreateProperties = { url, active: params.active ?? false };
     if (params.cookieStoreId) createOpts.cookieStoreId = params.cookieStoreId;
     const tab = await browser.tabs.create(createOpts);
     const names = await buildContainerLookup();
@@ -233,14 +233,7 @@ export const handlers: Record<string, Handler> = {
   [Methods.PagesScreenshot]: async (raw): Promise<ScreenshotPageResult> => {
     const params = raw as ScreenshotPageParams;
     const tabId = requireNumber(params?.tabId, "tabId");
-    const tab = await browser.tabs.get(tabId);
-    if (!tab.active) {
-      await browser.tabs.update(tabId, { active: true });
-      if (tab.windowId !== undefined) {
-        await browser.windows.update(tab.windowId, { focused: true });
-      }
-    }
-    const dataUrl = await browser.tabs.captureVisibleTab({ format: "png" });
+    const dataUrl = await browser.tabs.captureTab(tabId, { format: "png" });
     return { tabId, dataUrl };
   },
 

@@ -38,8 +38,10 @@ Dropped from `zen-mcp` because no WebExtension equivalent: `list_privileged_cont
 Deferred to v2 (need degraded-fidelity content-script bridges): `list_console_messages`, `clear_console_messages`, `list_network_requests`, `get_network_request`, `accept_dialog`, `dismiss_dialog`, `screenshot_by_uid`, full-page screenshot.
 
 Fidelity gaps to know:
-- `screenshot_page` captures only the active tab's visible viewport. It calls `select_page` for you first.
+- `screenshot_page` captures the target tab's visible viewport in place via `tabs.captureTab(tabId)` — it does **not** activate the tab or change window focus.
 - `evaluate_script` requires JSON-serializable args/results (the `scripting.executeScript` constraint). Returning DOM nodes or non-serializable objects fails.
+
+Focus behavior: automation is non-disruptive by default. `new_page` / `new_page_in_container` open tabs in the **background** (pass `active: true` to foreground), `navigate_page` and the DOM tools act on a tab by id without activating it, and `screenshot_page` captures without focus. The only tools that surface a tab to the foreground are `select_page` and an explicit `new_page(..., active: true)`. This means an MCP entry can drive one container (e.g. `zen-cxv`) while you browse in another (e.g. `zen-personal`) without your focus being stolen.
 
 ## Requirements
 
@@ -91,7 +93,7 @@ Accept the install prompt. **Then grant the host permission**:
 
 - `about:addons` -> Zen Extension MCP Bridge -> **Permissions and data** -> toggle **Access your data for all websites** ON.
 
-This is required for `screenshot_page` (`tabs.captureVisibleTab` rejects without it even though `<all_urls>` is declared). The other tools work without it.
+This is required for `screenshot_page` (`tabs.captureTab` needs host access to the tab being captured). The other tools work without it.
 
 > **Upgrade gotcha**: in-place upgrades (open a newer XPI while old is installed) sometimes silently no-op in Zen. If the version doesn't change in `about:addons`, **remove the old extension first**, then install the new one. Storage (URL + token settings) gets wiped on full removal.
 
@@ -167,7 +169,7 @@ claude mcp add zen-personal     node /abs/path/.../server/dist/index.js -- --por
 
 `--container <name>` resolves at server startup using the existing `zen-mcp` resolver: 0 matches errors with the available list; >1 matches errors with the matching list.
 
-When `--container` is set, `new_page` defaults to that cookieStoreId. `new_page_in_container` always takes an explicit name. `set_default_container` updates the scope at runtime for that MCP entry.
+When `--container` is set, `new_page` defaults to that cookieStoreId. `new_page_in_container` always takes an explicit name. `set_default_container` updates the scope at runtime for that MCP entry. Both new-tab tools open in the background by default; pass `active: true` to foreground the tab.
 
 ## Architecture
 
@@ -209,7 +211,7 @@ When iterating on extension code with the signed install in production: rebuild 
 
 **`extension not connected` from a tool call**: the extension is between reconnect attempts. Check `about:addons` -> Preferences -> status pill. If it says `error`, look at the background console (`about:debugging` -> Inspect on this extension -> Console). Common: token mismatch, daemon not running, port wrong.
 
-**`Missing activeTab permission` on `screenshot_page`**: the host permission isn't granted. Toggle "Access your data for all websites" in the extension's Permissions tab.
+**`Missing host permission for the tab` on `screenshot_page`**: the host permission isn't granted. Toggle "Access your data for all websites" in the extension's Permissions tab.
 
 **Storm of "replacing extension connection" in daemon log**: an old buggy version is still running alongside a new one (two background instances both reconnecting and replacing each other). Fully quit Zen and relaunch — should resolve. If it persists, uninstall and reinstall the extension.
 

@@ -4,6 +4,27 @@ All notable changes to this project will be documented here. Versions track the
 extension manifest and the AMO-signed XPI artifacts. Server, daemon, and shared
 package versions move together with the extension.
 
+## 0.0.13 (non-disruptive automation: background tabs + focus-free screenshots)
+
+- `new_page` / `new_page_in_container` now open tabs in the **background** by
+  default instead of foregrounding them. Added an optional `active` param
+  (default `false`) to both tools; pass `active: true` to bring the new tab to
+  the front. Handler default is `params.active ?? false`, so even an older
+  server that doesn't send the field gets background behavior.
+- `screenshot_page` no longer activates the target tab and focuses its window
+  before capturing. It now uses `tabs.captureTab(tabId)`, which captures a
+  specific tab in place. This removes the only remaining focus-steal in the
+  normal automation path.
+- Net effect: an MCP entry can drive one container (e.g. `zen-cxv`) while you
+  browse in another (e.g. `zen-personal`) without your active tab or window
+  focus being disturbed. The only tools that surface a tab are now `select_page`
+  and an explicit `new_page(..., active: true)`.
+- Verified live (`scripts/probe-focus.mjs`): a default `new_page` opened in the
+  background and left the originally-active tab active; `screenshot_page`
+  returned a full ~162 KB image of that inactive background tab without changing
+  focus; `active: true` still foregrounded. The probe restores the original
+  active tab on exit.
+
 ## 0.0.9 (keepalive bug fix)
 
 - `connect()` was bailing on a stale `this.ws` even when the socket was
