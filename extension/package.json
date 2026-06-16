@@ -7,7 +7,7 @@
     "clean": "rm -rf dist web-ext-artifacts",
     "run": "web-ext run --source-dir=dist --start-url=about:debugging",
     "lint": "web-ext lint --source-dir=dist",
-    "sign": "web-ext sign --source-dir=dist --channel=unlisted --api-key=$AMO_KEY --api-secret=$AMO_SECRET"
+    "sign": "bash scripts/sign.sh"
   },
   "dependencies": {
     "@zen-ext-mcp/shared": "*"
