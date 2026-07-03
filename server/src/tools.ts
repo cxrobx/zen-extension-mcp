@@ -3,11 +3,13 @@ import { z } from "zod";
 import {
   type ClearCookiesResult,
   type ContainersListResult,
+  ErrorCode,
   type EvaluateScriptResult,
   type FirefoxContainer,
   type GetCookiesResult,
   type GetPageTextResult,
   type InfoGetResult,
+  type InteractionResult,
   type LocatorSpec,
   Methods,
   type NavigateHistoryDirection,
@@ -19,13 +21,14 @@ import {
   type ScreenshotPageResult,
   type SelectOptionResult,
   type SetCookiesResult,
+  type ScrollResult,
   type SnapshotNode,
   type StorageClearResult,
   type StorageGetResult,
   type StorageSetResult,
   type TakeSnapshotResult,
 } from "@zen-ext-mcp/shared";
-import type { DaemonClient } from "./daemon-client.js";
+import { type DaemonClient, RpcError } from "./daemon-client.js";
 import {
   formatAvailableContainers,
   resolveContainerByName,
@@ -36,6 +39,8 @@ import { parseLocator } from "./locator.js";
 
 export interface ScopeRef {
   current: FirefoxContainer | null;
+  requestedName?: string | null;
+  resolving?: Promise<FirefoxContainer | null>;
 }
 
 export interface ServerIdentity {
@@ -55,11 +60,11 @@ function ok(text: string): ToolResponse {
   return { content: [{ type: "text", text }] };
 }
 
-function okWithImage(text: string, base64Png: string): ToolResponse {
+function okWithImage(text: string, base64: string, mimeType: string): ToolResponse {
   return {
     content: [
       { type: "text", text },
-      { type: "image", data: base64Png, mimeType: "image/png" },
+      { type: "image", data: base64, mimeType },
     ],
   };
 }
@@ -67,6 +72,13 @@ function okWithImage(text: string, base64Png: string): ToolResponse {
 function fail(err: unknown): ToolResponse {
   if (err instanceof ZenToolError) {
     return { isError: true, content: [{ type: "text", text: err.toToolText() }] };
+  }
+  if (err instanceof RpcError) {
+    const hint =
+      err.code === ErrorCode.ExtensionNotConnected || err.code === ErrorCode.ExtensionTimeout
+        ? "\n\nHint: Extension may be reconnecting - retry shortly, or check that it is enabled with 'Access your data for all websites' in about:addons."
+        : "";
+    return { isError: true, content: [{ type: "text", text: `${err.message}${hint}` }] };
   }
   const message = err instanceof Error ? err.message : String(err);
   return { isError: true, content: [{ type: "text", text: message }] };
@@ -113,6 +125,11 @@ function dataUrlToBase64(dataUrl: string): string {
   return dataUrl.slice(idx + 1);
 }
 
+function dataUrlMimeType(dataUrl: string): string {
+  const match = /^data:([^;,]+)[;,]/.exec(dataUrl);
+  return match?.[1] ?? "image/jpeg";
+}
+
 function sortedPages(pages: PageInfo[]): PageInfo[] {
   return [...pages].sort((a, b) => {
     if (a.windowId !== b.windowId) return a.windowId - b.windowId;
@@ -145,10 +162,52 @@ async function resolveScopeContainer(
   try {
     return resolveContainerByName(result.containers, name);
   } catch (err) {
-    throw new Error(
-      `${(err as Error).message}\nAvailable: ${formatAvailableContainers(result.containers)}`,
+    throw new ZenToolError(
+      "BAD_INPUT",
+      (err as Error).message,
+      `Available containers: ${formatAvailableContainers(result.containers)}`,
     );
   }
+}
+
+async function resolveScopeOnce(
+  daemon: DaemonClient,
+  scope: ScopeRef,
+): Promise<FirefoxContainer | null> {
+  if (scope.current) return scope.current;
+  if (!scope.requestedName) return null;
+  if (!scope.resolving) {
+    scope.resolving = resolveScopeContainer(daemon, scope.requestedName).then((container) => {
+      scope.current = container;
+      scope.requestedName = null;
+      scope.resolving = undefined;
+      return container;
+    });
+  }
+  try {
+    return await scope.resolving;
+  } catch (err) {
+    scope.resolving = undefined;
+    throw err;
+  }
+}
+
+function feedbackLine(r: InteractionResult): string {
+  const fb = r.feedback;
+  if (!fb) return "";
+  const active = fb.activeElement
+    ? ` active=${fb.activeElement.tag}${fb.activeElement.name ? ` name="${truncateOneLine(fb.activeElement.name, 60)}"` : ""}`
+    : "";
+  return `\npage: ${fb.title ? `"${truncateOneLine(fb.title, 80)}" ` : ""}${fb.url}${fb.navigated ? " navigated" : ""}${active}`;
+}
+
+function formatCookieFailures(
+  failures: Array<{ name: string; domain?: string; reason: string }> | undefined,
+): string {
+  if (!failures || failures.length === 0) return "";
+  return `\nfailed ${failures.length}: ${failures
+    .map((f) => `${f.name}${f.domain ? `@${f.domain}` : ""} (${f.reason})`)
+    .join(", ")}`;
 }
 
 export function registerTools(
@@ -192,6 +251,7 @@ export function registerTools(
     async ({ name }) => {
       try {
         scope.current = await resolveScopeContainer(daemon, name);
+        scope.requestedName = null;
         return ok(
           `default container set to "${scope.current.name}" (${scope.current.cookieStoreId})`,
         );
@@ -237,7 +297,8 @@ export function registerTools(
       try {
         const params: { url: string; cookieStoreId?: string; active?: boolean } = { url };
         if (active !== undefined) params.active = active;
-        if (scope.current) params.cookieStoreId = scope.current.cookieStoreId;
+        const scopedContainer = await resolveScopeOnce(daemon, scope);
+        if (scopedContainer) params.cookieStoreId = scopedContainer.cookieStoreId;
         const r = await daemon.call<NewPageResult>(Methods.PagesNew, params);
         const cn = r.containerName ?? "no container";
         return ok(`new page tabId=${r.tabId} -> ${r.url} (${cn})`);
@@ -420,10 +481,16 @@ export function registerTools(
           .optional()
           .describe("Include all visible elements, not just the relevance-filtered set"),
         includeIframes: z.boolean().optional(),
+        maxBytes: z.number().int().positive().optional(),
+        cursor: z.string().optional(),
       },
     },
-    async ({ pageIdx, selector, includeAll, includeIframes }) => {
+    async ({ pageIdx, selector, includeAll, includeIframes, maxBytes, cursor }) => {
       try {
+        if (cursor) {
+          const next = continueCursor(cursor, maxBytes);
+          return ok(next.text);
+        }
         const page = await resolvePageIdx(daemon, pageIdx);
         const params: Record<string, unknown> = { tabId: page.tabId };
         if (selector !== undefined) params.selector = selector;
@@ -432,7 +499,7 @@ export function registerTools(
         const r = await daemon.call<TakeSnapshotResult>(Methods.DomTakeSnapshot, params);
         if (r.selectorError) return fail(new Error(r.selectorError));
         const header = `snapshot ${r.snapshotId} for tabId=${r.tabId} (${r.uidMap.length} UIDs${r.truncated ? ", truncated" : ""})`;
-        return ok(`${header}\n${formatSnapshotTree(r.tree)}`);
+        return ok(`${header}\n${withResponseBudget(formatSnapshotTree(r.tree), maxBytes).text}`);
       } catch (err) {
         return fail(err);
       }
@@ -470,8 +537,11 @@ export function registerTools(
     async ({ pageIdx, uid }) => {
       try {
         const page = await resolvePageIdx(daemon, pageIdx);
-        await daemon.call(Methods.DomClick, { tabId: page.tabId, uid });
-        return ok(`clicked uid=${uid} on tabId=${page.tabId}`);
+        const r = await daemon.call<InteractionResult>(Methods.DomClick, {
+          tabId: page.tabId,
+          uid,
+        });
+        return ok(`clicked uid=${uid} on tabId=${page.tabId}${feedbackLine(r)}`);
       } catch (err) {
         return fail(err);
       }
@@ -491,8 +561,11 @@ export function registerTools(
     async ({ pageIdx, uid }) => {
       try {
         const page = await resolvePageIdx(daemon, pageIdx);
-        await daemon.call(Methods.DomHover, { tabId: page.tabId, uid });
-        return ok(`hovered uid=${uid} on tabId=${page.tabId}`);
+        const r = await daemon.call<InteractionResult>(Methods.DomHover, {
+          tabId: page.tabId,
+          uid,
+        });
+        return ok(`hovered uid=${uid} on tabId=${page.tabId}${feedbackLine(r)}`);
       } catch (err) {
         return fail(err);
       }
@@ -514,8 +587,12 @@ export function registerTools(
     async ({ pageIdx, uid, value }) => {
       try {
         const page = await resolvePageIdx(daemon, pageIdx);
-        await daemon.call(Methods.DomFill, { tabId: page.tabId, uid, value });
-        return ok(`filled uid=${uid} on tabId=${page.tabId}`);
+        const r = await daemon.call<InteractionResult>(Methods.DomFill, {
+          tabId: page.tabId,
+          uid,
+          value,
+        });
+        return ok(`filled uid=${uid} on tabId=${page.tabId}${feedbackLine(r)}`);
       } catch (err) {
         return fail(err);
       }
@@ -536,8 +613,11 @@ export function registerTools(
     async ({ pageIdx, fields }) => {
       try {
         const page = await resolvePageIdx(daemon, pageIdx);
-        await daemon.call(Methods.DomFillForm, { tabId: page.tabId, fields });
-        return ok(`filled ${fields.length} fields on tabId=${page.tabId}`);
+        const r = await daemon.call<InteractionResult>(Methods.DomFillForm, {
+          tabId: page.tabId,
+          fields,
+        });
+        return ok(`filled ${fields.length} fields on tabId=${page.tabId}${feedbackLine(r)}`);
       } catch (err) {
         return fail(err);
       }
@@ -559,12 +639,12 @@ export function registerTools(
     async ({ pageIdx, fromUid, toUid }) => {
       try {
         const page = await resolvePageIdx(daemon, pageIdx);
-        await daemon.call(Methods.DomDrag, {
+        const r = await daemon.call<InteractionResult>(Methods.DomDrag, {
           tabId: page.tabId,
           fromUid,
           toUid,
         });
-        return ok(`dragged ${fromUid} -> ${toUid} on tabId=${page.tabId}`);
+        return ok(`dragged ${fromUid} -> ${toUid} on tabId=${page.tabId}${feedbackLine(r)}`);
       } catch (err) {
         return fail(err);
       }
@@ -605,10 +685,16 @@ export function registerTools(
       inputSchema: {
         pageIdx: z.number().int().nonnegative(),
         code: z.string().describe("Function body. Use `return` to send a value back."),
+        maxBytes: z.number().int().positive().optional(),
+        cursor: z.string().optional(),
       },
     },
-    async ({ pageIdx, code }) => {
+    async ({ pageIdx, code, maxBytes, cursor }) => {
       try {
+        if (cursor) {
+          const next = continueCursor(cursor, maxBytes);
+          return ok(next.text);
+        }
         const page = await resolvePageIdx(daemon, pageIdx);
         const r = await daemon.call<EvaluateScriptResult>(Methods.DomEvaluate, {
           tabId: page.tabId,
@@ -620,7 +706,7 @@ export function registerTools(
             : typeof r.result === "string"
               ? r.result
               : JSON.stringify(r.result, null, 2);
-        return ok(text);
+        return ok(withResponseBudget(text, maxBytes).text);
       } catch (err) {
         return fail(err);
       }
@@ -632,17 +718,31 @@ export function registerTools(
     {
       title: "Screenshot page",
       description:
-        "Capture the visible viewport of the tab at pageIdx as PNG. Captures the tab in place without activating it or changing window focus.",
-      inputSchema: { pageIdx: z.number().int().nonnegative() },
+        "Capture the visible viewport of the tab at pageIdx. Defaults to JPEG quality 80; pass format=png for lossless output. Captures the tab in place without activating it or changing window focus.",
+      inputSchema: {
+        pageIdx: z.number().int().nonnegative(),
+        format: z.enum(["jpeg", "png"]).optional(),
+        quality: z.number().int().min(0).max(100).optional(),
+      },
     },
-    async ({ pageIdx }) => {
+    async ({ pageIdx, format, quality }) => {
       try {
         const page = await resolvePageIdx(daemon, pageIdx);
-        const r = await daemon.call<ScreenshotPageResult>(Methods.PagesScreenshot, {
+        const params: { tabId: number; format?: "jpeg" | "png"; quality?: number } = {
           tabId: page.tabId,
+        };
+        if (format) params.format = format;
+        if (typeof quality === "number") params.quality = quality;
+        const r = await daemon.call<ScreenshotPageResult>(Methods.PagesScreenshot, {
+          ...params,
         });
         const base64 = dataUrlToBase64(r.dataUrl);
-        return okWithImage(`screenshot of tabId=${r.tabId} (${base64.length} bytes base64)`, base64);
+        const mimeType = dataUrlMimeType(r.dataUrl);
+        return okWithImage(
+          `screenshot of tabId=${r.tabId} (${base64.length} bytes base64, ${mimeType})`,
+          base64,
+          mimeType,
+        );
       } catch (err) {
         return fail(err);
       }
@@ -999,14 +1099,19 @@ export function registerTools(
       inputSchema: {
         pageIdx: z.number().int().nonnegative(),
         selector: z.string(),
+        timeoutMs: z.number().int().positive().optional(),
       },
     },
-    async ({ pageIdx, selector }) => {
+    async ({ pageIdx, selector, timeoutMs }) => {
       try {
         const page = await resolvePageIdx(daemon, pageIdx);
         const locator = toLocator(selector);
-        await daemon.call(Methods.DomClickByLocator, { tabId: page.tabId, locator });
-        return ok(`clicked ${selector}`);
+        const r = await daemon.call<InteractionResult>(Methods.DomClickByLocator, {
+          tabId: page.tabId,
+          locator,
+          ...(typeof timeoutMs === "number" ? { timeoutMs } : {}),
+        });
+        return ok(`clicked ${selector}${feedbackLine(r)}`);
       } catch (err) {
         return fail(err);
       }
@@ -1021,14 +1126,19 @@ export function registerTools(
       inputSchema: {
         pageIdx: z.number().int().nonnegative(),
         selector: z.string(),
+        timeoutMs: z.number().int().positive().optional(),
       },
     },
-    async ({ pageIdx, selector }) => {
+    async ({ pageIdx, selector, timeoutMs }) => {
       try {
         const page = await resolvePageIdx(daemon, pageIdx);
         const locator = toLocator(selector);
-        await daemon.call(Methods.DomHoverByLocator, { tabId: page.tabId, locator });
-        return ok(`hovered ${selector}`);
+        const r = await daemon.call<InteractionResult>(Methods.DomHoverByLocator, {
+          tabId: page.tabId,
+          locator,
+          ...(typeof timeoutMs === "number" ? { timeoutMs } : {}),
+        });
+        return ok(`hovered ${selector}${feedbackLine(r)}`);
       } catch (err) {
         return fail(err);
       }
@@ -1045,18 +1155,20 @@ export function registerTools(
         pageIdx: z.number().int().nonnegative(),
         selector: z.string(),
         value: z.string(),
+        timeoutMs: z.number().int().positive().optional(),
       },
     },
-    async ({ pageIdx, selector, value }) => {
+    async ({ pageIdx, selector, value, timeoutMs }) => {
       try {
         const page = await resolvePageIdx(daemon, pageIdx);
         const locator = toLocator(selector);
-        await daemon.call(Methods.DomFillByLocator, {
+        const r = await daemon.call<InteractionResult>(Methods.DomFillByLocator, {
           tabId: page.tabId,
           locator,
           value,
+          ...(typeof timeoutMs === "number" ? { timeoutMs } : {}),
         });
-        return ok(`filled ${selector}`);
+        return ok(`filled ${selector}${feedbackLine(r)}`);
       } catch (err) {
         return fail(err);
       }
@@ -1075,20 +1187,22 @@ export function registerTools(
         text: z.string(),
         delayMs: z.number().int().nonnegative().optional(),
         clearFirst: z.boolean().optional(),
+        timeoutMs: z.number().int().positive().optional(),
       },
     },
-    async ({ pageIdx, selector, text, delayMs, clearFirst }) => {
+    async ({ pageIdx, selector, text, delayMs, clearFirst, timeoutMs }) => {
       try {
         const page = await resolvePageIdx(daemon, pageIdx);
         const locator = toLocator(selector);
-        await daemon.call(Methods.DomTypeByLocator, {
+        const r = await daemon.call<InteractionResult>(Methods.DomTypeByLocator, {
           tabId: page.tabId,
           locator,
           text,
           ...(typeof delayMs === "number" ? { delayMs } : {}),
           ...(typeof clearFirst === "boolean" ? { clearFirst } : {}),
+          ...(typeof timeoutMs === "number" ? { timeoutMs } : {}),
         });
-        return ok(`typed ${text.length} chars into ${selector}`);
+        return ok(`typed ${text.length} chars into ${selector}${feedbackLine(r)}`);
       } catch (err) {
         return fail(err);
       }
@@ -1105,17 +1219,19 @@ export function registerTools(
         pageIdx: z.number().int().nonnegative(),
         from: z.string(),
         to: z.string(),
+        timeoutMs: z.number().int().positive().optional(),
       },
     },
-    async ({ pageIdx, from, to }) => {
+    async ({ pageIdx, from, to, timeoutMs }) => {
       try {
         const page = await resolvePageIdx(daemon, pageIdx);
-        await daemon.call(Methods.DomDragByLocator, {
+        const r = await daemon.call<InteractionResult>(Methods.DomDragByLocator, {
           tabId: page.tabId,
           from: toLocator(from),
           to: toLocator(to),
+          ...(typeof timeoutMs === "number" ? { timeoutMs } : {}),
         });
-        return ok(`dragged ${from} -> ${to}`);
+        return ok(`dragged ${from} -> ${to}${feedbackLine(r)}`);
       } catch (err) {
         return fail(err);
       }
@@ -1133,9 +1249,10 @@ export function registerTools(
         selector: z.string(),
         by: z.enum(["value", "label", "index"]),
         value: z.string(),
+        timeoutMs: z.number().int().positive().optional(),
       },
     },
-    async ({ pageIdx, selector, by, value }) => {
+    async ({ pageIdx, selector, by, value, timeoutMs }) => {
       try {
         const page = await resolvePageIdx(daemon, pageIdx);
         const locator = toLocator(selector);
@@ -1144,6 +1261,7 @@ export function registerTools(
           locator,
           by,
           value,
+          ...(typeof timeoutMs === "number" ? { timeoutMs } : {}),
         });
         if (!r.ok) {
           if (r.reason === "not_select") {
@@ -1160,7 +1278,9 @@ export function registerTools(
             `No <option> matched by=${by} value=${value}`,
           );
         }
-        return ok(`selected "${r.label ?? ""}" (value="${r.value ?? ""}") in ${selector}`);
+        return ok(
+          `selected "${r.label ?? ""}" (value="${r.value ?? ""}") in ${selector}${feedbackLine({ tabId: page.tabId, feedback: r.feedback })}`,
+        );
       } catch (err) {
         return fail(err);
       }
@@ -1177,16 +1297,66 @@ export function registerTools(
         pageIdx: z.number().int().nonnegative(),
         keys: z.string(),
         selector: z.string().optional(),
+        timeoutMs: z.number().int().positive().optional(),
       },
     },
-    async ({ pageIdx, keys, selector }) => {
+    async ({ pageIdx, keys, selector, timeoutMs }) => {
       try {
         const page = await resolvePageIdx(daemon, pageIdx);
         const target = selector
           ? { kind: "locator" as const, locator: toLocator(selector) }
           : { kind: "active" as const };
-        await daemon.call(Methods.DomPressKey, { tabId: page.tabId, target, keys });
-        return ok(`pressed ${keys}${selector ? ` on ${selector}` : ""}`);
+        const r = await daemon.call<InteractionResult>(Methods.DomPressKey, {
+          tabId: page.tabId,
+          target,
+          keys,
+          ...(typeof timeoutMs === "number" ? { timeoutMs } : {}),
+        });
+        return ok(`pressed ${keys}${selector ? ` on ${selector}` : ""}${feedbackLine(r)}`);
+      } catch (err) {
+        return fail(err);
+      }
+    },
+  );
+
+  server.registerTool(
+    "scroll",
+    {
+      title: "Scroll page",
+      description:
+        "Scroll a page by pixels, by pages, or to a locator/UID. Returns the new scroll position and edge flags.",
+      inputSchema: {
+        pageIdx: z.number().int().nonnegative(),
+        x: z.number().optional().describe("Horizontal pixel delta."),
+        y: z.number().optional().describe("Vertical pixel delta."),
+        pages: z.number().optional().describe("Vertical page delta, where 1 is one viewport."),
+        selector: z.string().optional().describe("Locator to scroll into view."),
+        uid: z.string().optional().describe("Snapshot UID to scroll into view."),
+        timeoutMs: z.number().int().positive().optional(),
+      },
+    },
+    async ({ pageIdx, x, y, pages, selector, uid, timeoutMs }) => {
+      try {
+        const page = await resolvePageIdx(daemon, pageIdx);
+        const params: {
+          tabId: number;
+          x?: number;
+          y?: number;
+          pages?: number;
+          locator?: LocatorSpec;
+          uid?: string;
+          timeoutMs?: number;
+        } = { tabId: page.tabId };
+        if (typeof x === "number") params.x = x;
+        if (typeof y === "number") params.y = y;
+        if (typeof pages === "number") params.pages = pages;
+        if (selector) params.locator = toLocator(selector);
+        if (uid) params.uid = uid;
+        if (typeof timeoutMs === "number") params.timeoutMs = timeoutMs;
+        const r = await daemon.call<ScrollResult>(Methods.DomScroll, params);
+        return ok(
+          `scroll tabId=${r.tabId} x=${Math.round(r.x)} y=${Math.round(r.y)} atTop=${r.atTop} atBottom=${r.atBottom}`,
+        );
       } catch (err) {
         return fail(err);
       }
@@ -1204,17 +1374,23 @@ export function registerTools(
         name: z.string().optional(),
         domain: z.string().optional(),
         storeId: z.string().optional(),
+        maxBytes: z.number().int().positive().optional(),
+        cursor: z.string().optional(),
       },
     },
-    async ({ url, name, domain, storeId }) => {
+    async ({ url, name, domain, storeId, maxBytes, cursor }) => {
       try {
+        if (cursor) {
+          const next = continueCursor(cursor, maxBytes);
+          return ok(next.text);
+        }
         const params: { url?: string; name?: string; domain?: string; storeId?: string } = {};
         if (url) params.url = url;
         if (name) params.name = name;
         if (domain) params.domain = domain;
         if (storeId) params.storeId = storeId;
         const r = await daemon.call<GetCookiesResult>(Methods.CookiesGet, params);
-        return ok(JSON.stringify(r.cookies, null, 2));
+        return ok(withResponseBudget(JSON.stringify(r.cookies, null, 2), maxBytes).text);
       } catch (err) {
         return fail(err);
       }
@@ -1249,7 +1425,9 @@ export function registerTools(
     async ({ cookies }) => {
       try {
         const r = await daemon.call<SetCookiesResult>(Methods.CookiesSet, { cookies });
-        return ok(`set ${r.set} cookie${r.set === 1 ? "" : "s"}`);
+        return ok(
+          `set ${r.set} cookie${r.set === 1 ? "" : "s"}${formatCookieFailures(r.failures)}`,
+        );
       } catch (err) {
         return fail(err);
       }
@@ -1277,7 +1455,9 @@ export function registerTools(
         if (domain) params.domain = domain;
         if (storeId) params.storeId = storeId;
         const r = await daemon.call<ClearCookiesResult>(Methods.CookiesClear, params);
-        return ok(`deleted ${r.deleted} cookie${r.deleted === 1 ? "" : "s"}`);
+        return ok(
+          `deleted ${r.deleted} cookie${r.deleted === 1 ? "" : "s"}${formatCookieFailures(r.failures)}`,
+        );
       } catch (err) {
         return fail(err);
       }
@@ -1293,10 +1473,16 @@ export function registerTools(
         pageIdx: z.number().int().nonnegative(),
         kind: z.enum(["local", "session"]),
         keys: z.array(z.string()).optional(),
+        maxBytes: z.number().int().positive().optional(),
+        cursor: z.string().optional(),
       },
     },
-    async ({ pageIdx, kind, keys }) => {
+    async ({ pageIdx, kind, keys, maxBytes, cursor }) => {
       try {
+        if (cursor) {
+          const next = continueCursor(cursor, maxBytes);
+          return ok(next.text);
+        }
         const page = await resolvePageIdx(daemon, pageIdx);
         const params: { tabId: number; kind: "local" | "session"; keys?: string[] } = {
           tabId: page.tabId,
@@ -1304,7 +1490,7 @@ export function registerTools(
         };
         if (keys) params.keys = keys;
         const r = await daemon.call<StorageGetResult>(Methods.StorageGet, params);
-        return ok(JSON.stringify(r.items, null, 2));
+        return ok(withResponseBudget(JSON.stringify(r.items, null, 2), maxBytes).text);
       } catch (err) {
         return fail(err);
       }
@@ -1386,7 +1572,7 @@ export function registerTools(
         const lines = [
           `mcp.server: ${identity.name} ${identity.version}`,
           `mcp.daemonUrl: ${identity.daemonUrl}`,
-          `mcp.scope: ${scope.current ? `${scope.current.name} (${scope.current.cookieStoreId})` : "(none)"}`,
+          `mcp.scope: ${scope.current ? `${scope.current.name} (${scope.current.cookieStoreId})` : scope.requestedName ? `${scope.requestedName} (pending resolution)` : "(none)"}`,
           `extension.id: ${r.extensionId}`,
           `extension.version: ${r.extensionVersion}`,
           `extension.platform: ${r.platform}`,

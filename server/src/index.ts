@@ -2,13 +2,8 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { readFileSync } from "node:fs";
-import { type ContainersListResult, Methods } from "@zen-ext-mcp/shared";
 import { parseArgs } from "./cli.js";
 import { DaemonClient, RpcError } from "./daemon-client.js";
-import {
-  formatAvailableContainers,
-  resolveContainerByName,
-} from "./container.js";
 import { type ScopeRef, registerTools } from "./tools.js";
 
 const SERVER_NAME = "zen-ext-mcp";
@@ -23,6 +18,31 @@ function readToken(path: string): string {
   return readFileSync(path, "utf8").trim();
 }
 
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function connectWithRetry(daemon: DaemonClient, url: string): Promise<void> {
+  let delayMs = 500;
+  const attempts = 5;
+  for (let attempt = 1; attempt <= attempts; attempt++) {
+    try {
+      await daemon.connect();
+      return;
+    } catch (err) {
+      if (attempt === attempts) throw err;
+      logStderr("daemon connect failed; retrying", {
+        url,
+        attempt,
+        nextDelayMs: delayMs,
+        err: (err as Error).message,
+      });
+      await sleep(delayMs);
+      delayMs = Math.min(delayMs * 2, 10_000);
+    }
+  }
+}
+
 async function main(): Promise<void> {
   const opts = parseArgs(process.argv.slice(2));
   const token = readToken(opts.tokenPath);
@@ -33,25 +53,12 @@ async function main(): Promise<void> {
     token,
     containerScope: opts.container,
   });
-  await daemon.connect();
+  await connectWithRetry(daemon, url);
   logStderr("connected to daemon", { url, container: opts.container });
 
-  const scope: ScopeRef = { current: null };
+  const scope: ScopeRef = { current: null, requestedName: opts.container };
   if (opts.container) {
-    const result = await daemon.call<ContainersListResult>(Methods.ContainersList);
-    try {
-      scope.current = resolveContainerByName(result.containers, opts.container);
-      logStderr("container scope resolved", {
-        name: scope.current.name,
-        cookieStoreId: scope.current.cookieStoreId,
-      });
-    } catch (err) {
-      logStderr("container scope error", {
-        err: (err as Error).message,
-        available: formatAvailableContainers(result.containers),
-      });
-      throw err;
-    }
+    logStderr("container scope deferred", { name: opts.container });
   }
 
   const server = new McpServer({ name: SERVER_NAME, version: SERVER_VERSION });

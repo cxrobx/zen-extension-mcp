@@ -23,14 +23,14 @@ Claude Code  --stdio-->  MCP server (per session, --container-scoped)
 ```
 
 - **daemon/** — Node WS router. Single extension, N clients. Auth + ping.
-- **server/** — MCP stdio (`McpServer` from `@modelcontextprotocol/sdk`). Connects to daemon as a client. `--container <name>` resolves at startup, mutable via `set_default_container`.
+- **server/** — MCP stdio (`McpServer` from `@modelcontextprotocol/sdk`). Connects to daemon as a client. `--container <name>` resolves lazily on first new-tab use, mutable via `set_default_container`.
 - **extension/** — MV3 background + options page + lazy-injected snapshot bundle.
 - **shared/** — Wire types, method-name constants, error codes. Single source of truth.
 
 ## Daily-driver state (already set up)
 
 - Daemon: launchd `~/Library/LaunchAgents/io.cxrobx.zen-extension-mcp.daemon.plist` → `/usr/local/bin/node` runs `daemon/dist/index.js --port 8766`. Logs at `~/Library/Logs/zen-extension-mcp/daemon.{out,err}.log`.
-- Extension: signed via AMO unlisted, gecko id `zen-ext-mcp@cxrobx`, currently 0.0.9. Settings (URL + token) live in `browser.storage.local`.
+- Extension: signed via AMO unlisted, gecko id `zen-ext-mcp@cxrobx`, currently 0.0.15. Settings (URL + token) live in `browser.storage.local`; snapshot UID maps live in `browser.storage.session`.
 - Auth token: `~/.config/zen-extension-mcp/auth.token` (mode 0600, 32-byte hex). Daemon generates on first launch.
 - AMO signing creds: `~/.config/zen-extension-mcp/.env` (mode 0600, `AMO_KEY` + `AMO_SECRET`). Sourced by `extension/scripts/sign.sh`; `npm run extension:sign` works with no inline env. Get fresh keys at https://addons.mozilla.org/developers/addon/api/key/.
 - 7 MCP entries at user scope (`~/.claude.json`): `zen-ext`, `zen-cxv`, `zen-personal`, `zen-geek`, `zen-music`, `zen-buildersbuddy`, `zen-artist`.
@@ -81,7 +81,7 @@ For installation specifically: `open -a "/Applications/Zen.app" <xpi>` triggers 
 | `scripts/probe.mjs` | `list_containers` against real Zen. |
 | `scripts/probe-pages.mjs` | M2: new_page, navigate, select, set_default_container, close. Creates + cleans up. |
 | `scripts/probe-dom.mjs` | M3 read-side: snapshot, evaluate_script, resolve_uid, screenshot. Targets example.com. |
-| `scripts/probe-interact.mjs` | M3 write-side: click, hover, fill, fill_form against a self-served localhost fixture. |
+| `scripts/probe-interact.mjs` | M3 write-side: click, hover, fill, fill_form, rich editor input, pointer sequence, auto-scroll, auto-wait against a self-served localhost fixture. |
 | `scripts/probe-info.mjs` | get_firefox_info with and without `--container` scope. |
 
 After any extension change, run the relevant probe(s) — `npm run build` doesn't catch logic errors in handlers.
@@ -91,7 +91,9 @@ After any extension change, run the relevant probe(s) — `npm run build` doesn'
 - **CSP `upgrade-insecure-requests`** is in Firefox MV3's default extension CSP and silently rewrites `ws://127.0.0.1` to `wss://`. The daemon doesn't speak TLS so the connection hangs in CONNECTING. The manifest already overrides this (`content_security_policy.extension_pages` without that directive). **Don't remove that override.**
 - **`<all_urls>` is opt-in by user in MV3.** Declared in manifest ≠ granted at runtime. User must toggle "Access your data for all websites" in `about:addons`. `screenshot_page` (`tabs.captureVisibleTab`) needs this; `scripting.executeScript` works without.
 - **`captureVisibleTab(windowId, opts)`** rejects with "Missing activeTab permission" in Zen even with `<all_urls>`. The fix already shipped: activate the target tab first, then call `captureVisibleTab(opts)` with no windowId.
-- **MV3 backgrounds suspend** after ~80s of "idle" in Firefox 147 even with active WebSockets. The 30s `browser.alarms` keepalive (already shipped in 0.0.8/0.0.9) keeps the background alive AND force-reconnects when `ws.readyState !== OPEN`. **Don't remove this** without a replacement strategy.
+- **MV3 backgrounds suspend** after ~80s of "idle" in Firefox 147 even with active WebSockets. The 30s `browser.alarms` keepalive keeps the background alive AND force-reconnects when `ws.readyState !== OPEN`. **Don't remove this** without a replacement strategy.
+- **Snapshot UID maps are in `browser.storage.session`.** Keep writes small and keyed by tabId. Clear both memory and session storage on navigation invalidation.
+- **Rich-editor `fill`/`type` can't rely on `execCommand("insertText")`.** Firefox gates editing execCommands on `document.hasFocus()`, which is false during background automation — and on framework editors (Lexical/ProseMirror/Slate) it then *lies*, returning `true` while inserting nothing. `richInsert` (`handlers.ts`) gates execCommand on `hasFocus`, else dispatches a synthetic `beforeinput` + explicit Range and **verifies by DOM readback** (~20ms reconcile, measured on Lexical). Only fire `input` yourself when the editor did **not** claim the `beforeinput` (`preventDefault`), or the text double-inserts. If the readback still fails, `runFillLike` escalates to focus-the-window-then-retry (the only path that gives execCommand a trusted, working beforeinput). **Don't "simplify" this back to `textContent = value` or to trusting execCommand's return.**
 - **Connect must be idempotent and resilient to stale ws.** `connect()` treats CLOSED/CLOSING as null. The keepalive uses `isHealthy()` (`ws.readyState === OPEN`) not the cached state field — state lies after asymmetric WS shutdown.
 - **`evaluate_script`** wraps user code with `new Function(code)()`. User provides function body, uses `return` for the result, must be JSON-serializable. DOM nodes fail.
 - **AMO signing** rejects re-uploads of an already-signed version. Always bump the manifest version, and check AMO for the highest version (curl + jq snippet above) before deciding what to bump to — local artifacts can lag behind what AMO has on file.
@@ -120,7 +122,7 @@ After any extension change, run the relevant probe(s) — `npm run build` doesn'
 
 Still gaps as of this writing:
 
-- **Console messages**, **dialog handling** (`accept_dialog` / `dismiss_dialog`), **full network response bodies**. Content-script bridges with degraded fidelity. Still v2.
+- **Console messages**, **dialog handling** (`accept_dialog` / `dismiss_dialog`), **network capture / full network response bodies**. Content-script bridges with degraded fidelity. Still v2.
 - **Privileged-context tools** — fundamental WebExtension capability gap. Use `~/Projects/zen-mcp` for those.
 - **File upload by UID** — browser security blocks it from any extension.
 - **Multi-window management** — `tab.windowId` flows through `PageInfo` but there are no window-level tools (focus, move, resize).
@@ -130,10 +132,8 @@ Already done (was deferred in the original plan but landed since):
 - `read_page` via bundled Readability + Turndown.
 - Cookies (`get_cookies` / `set_cookies` / `clear_cookies`).
 - Local + session storage (`get_storage` / `set_storage` / `clear_storage`).
-- Network interception with `urlPattern` / `mimeType` filters, block + mock.
-- `save_pdf` + `export_har` for page archival.
 - Locator-prefix support (`css:`, `xpath:`, `text:`, `text*:`, `role:`) across `click`, `hover`, `fill`, etc. — the `_by_uid` family still works as the snapshot path; the unprefixed/prefixed variants are the Playwright-style fast path.
-- `get_page_text`, `find_by_text`, `wait_for`, `press_key`, `type`, `select_option`.
+- `get_page_text`, `find_by_text`, `wait_for`, `press_key`, `type`, `select_option`, `scroll`.
 
 If you're adding any of these, double-check the README's "Tool surface" table and update both there and here.
 

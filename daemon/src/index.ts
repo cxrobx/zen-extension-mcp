@@ -18,6 +18,8 @@ import { log } from "./log.js";
 const HEARTBEAT_INTERVAL_MS = 30_000;
 const HELLO_TIMEOUT_MS = 5_000;
 const REQUEST_TIMEOUT_MS = 30_000;
+const EXTENSION_RECONNECT_GRACE_MS = 3_000;
+const QUEUE_SWEEP_INTERVAL_MS = 250;
 
 interface CliOptions {
   port: number;
@@ -58,6 +60,12 @@ interface PendingRequest {
   timer: NodeJS.Timeout;
 }
 
+interface QueuedRequest {
+  clientId: string;
+  msg: RequestMessage;
+  deadline: number;
+}
+
 interface Connection {
   id: string;
   ws: WebSocket;
@@ -73,7 +81,9 @@ class Daemon {
   private extension: Connection | null = null;
   private clients = new Map<string, Connection>();
   private pending = new Map<string, PendingRequest>();
+  private queuedForExtension: QueuedRequest[] = [];
   private heartbeat: NodeJS.Timeout | null = null;
+  private queueSweep: NodeJS.Timeout | null = null;
   readonly serverId = randomUUID();
 
   constructor(private readonly token: string) {}
@@ -89,6 +99,10 @@ class Daemon {
       wss.on("connection", (ws) => this.onConnection(ws));
       this.wss = wss;
       this.heartbeat = setInterval(() => this.tick(), HEARTBEAT_INTERVAL_MS);
+      this.queueSweep = setInterval(
+        () => this.sweepExpiredQueuedRequests(),
+        QUEUE_SWEEP_INTERVAL_MS,
+      );
     });
   }
 
@@ -186,6 +200,7 @@ class Daemon {
         this.failPendingForExtension();
       }
       this.extension = conn;
+      this.flushQueuedRequests();
     } else {
       this.clients.set(conn.id, conn);
     }
@@ -195,7 +210,7 @@ class Daemon {
       serverId: this.serverId,
       protocolVersion: PROTOCOL_VERSION,
     });
-    log.info("authenticated", {
+    log.debug("authenticated", {
       connId: conn.id,
       role: msg.role,
       containerScope: conn.containerScope ?? null,
@@ -210,6 +225,18 @@ class Daemon {
       });
       return;
     }
+    if (!this.extension) {
+      this.queuedForExtension.push({
+        clientId: conn.id,
+        msg,
+        deadline: Date.now() + EXTENSION_RECONNECT_GRACE_MS,
+      });
+      return;
+    }
+    this.forwardToExtension(conn, msg);
+  }
+
+  private forwardToExtension(conn: Connection, msg: RequestMessage): void {
     if (!this.extension) {
       this.respond(conn, msg.id, undefined, {
         code: ErrorCode.ExtensionNotConnected,
@@ -236,6 +263,44 @@ class Daemon {
     this.send(this.extension, msg);
   }
 
+  private flushQueuedRequests(): void {
+    if (!this.extension || this.queuedForExtension.length === 0) return;
+    const now = Date.now();
+    const queued = this.queuedForExtension;
+    this.queuedForExtension = [];
+    for (const item of queued) {
+      const client = this.clients.get(item.clientId);
+      if (!client) continue;
+      if (item.deadline <= now) {
+        this.respond(client, item.msg.id, undefined, {
+          code: ErrorCode.ExtensionNotConnected,
+          message: "extension not connected",
+        });
+        continue;
+      }
+      this.forwardToExtension(client, item.msg);
+    }
+  }
+
+  private sweepExpiredQueuedRequests(): void {
+    if (this.queuedForExtension.length === 0) return;
+    const now = Date.now();
+    const remaining: QueuedRequest[] = [];
+    for (const item of this.queuedForExtension) {
+      const client = this.clients.get(item.clientId);
+      if (!client) continue;
+      if (item.deadline <= now) {
+        this.respond(client, item.msg.id, undefined, {
+          code: ErrorCode.ExtensionNotConnected,
+          message: "extension not connected",
+        });
+      } else {
+        remaining.push(item);
+      }
+    }
+    this.queuedForExtension = remaining;
+  }
+
   private handleResponse(conn: Connection, msg: ResponseMessage): void {
     if (conn.role !== "extension") {
       log.warn("non-extension sent response", { connId: conn.id });
@@ -260,12 +325,16 @@ class Daemon {
   private onClose(conn: Connection, code: number, reason: string): void {
     if (conn.helloTimer) clearTimeout(conn.helloTimer);
     if (conn.role === "extension" && this.extension?.id === conn.id) {
-      log.info("extension disconnected", { code, reason });
+      log.debug("extension disconnected", { code, reason });
       this.extension = null;
+      // In-flight requests fail fast. Re-sending after reconnect could double-execute actions.
       this.failPendingForExtension();
     } else if (conn.role === "client") {
       this.clients.delete(conn.id);
-      log.info("client disconnected", {
+      this.queuedForExtension = this.queuedForExtension.filter(
+        (item) => item.clientId !== conn.id,
+      );
+      log.debug("client disconnected", {
         connId: conn.id,
         containerScope: conn.containerScope ?? null,
       });
@@ -287,6 +356,7 @@ class Daemon {
   }
 
   private tick(): void {
+    this.sweepExpiredQueuedRequests();
     const conns: Connection[] = [];
     if (this.extension) conns.push(this.extension);
     for (const c of this.clients.values()) conns.push(c);
@@ -328,6 +398,7 @@ class Daemon {
 
   async stop(): Promise<void> {
     if (this.heartbeat) clearInterval(this.heartbeat);
+    if (this.queueSweep) clearInterval(this.queueSweep);
     if (this.wss) {
       await new Promise<void>((resolve) => this.wss!.close(() => resolve()));
     }

@@ -2,6 +2,7 @@ export interface UidEntry {
   uid: string;
   css: string;
   xpath?: string;
+  frameId?: number;
 }
 
 export interface AriaAttributes {

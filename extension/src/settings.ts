@@ -4,7 +4,7 @@ export interface Settings {
 }
 
 const DEFAULTS: Settings = {
-  daemonUrl: "ws://127.0.0.1:8765",
+  daemonUrl: "ws://127.0.0.1:8766",
   token: "",
 };
 

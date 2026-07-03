@@ -17,6 +17,7 @@ import {
   type GetPageTextParams,
   type GetPageTextResult,
   type InfoGetResult,
+  type InteractionResult,
   type LocatorParams,
   type LocatorSpec,
   Methods,
@@ -37,6 +38,8 @@ import {
   type SelectPageParams,
   type SetCookiesParams,
   type SetCookiesResult,
+  type ScrollParams,
+  type ScrollResult,
   type SnapshotUidEntry,
   type StorageClearParams,
   type StorageClearResult,
@@ -52,6 +55,11 @@ import {
 } from "@zen-ext-mcp/shared";
 
 export type Handler = (params: unknown) => Promise<unknown>;
+
+const EXECUTE_SCRIPT_TIMEOUT_MS = 15_000;
+const DEFAULT_LOCATOR_TIMEOUT_MS = 5_000;
+const POLL_MS = 200;
+const PAGE_TEXT_MAX_CHARS = 200_000;
 
 async function buildContainerLookup(): Promise<Map<string, string>> {
   const identities = await browser.contextualIdentities.query({});
@@ -93,52 +101,210 @@ function requireNumber(value: unknown, name: string): number {
 const snapshotCache = new Map<number, Map<string, SnapshotUidEntry>>();
 let nextSnapshotId = 1;
 
-browser.webNavigation.onCommitted.addListener((details) => {
-  if (details.frameId === 0) snapshotCache.delete(details.tabId);
-});
-browser.tabs.onRemoved.addListener((tabId) => snapshotCache.delete(tabId));
+interface SnapshotStorageArea {
+  get(keys?: string | string[] | Record<string, unknown> | null): Promise<Record<string, unknown>>;
+  set(items: Record<string, unknown>): Promise<void>;
+  remove(keys: string | string[]): Promise<void>;
+}
 
-async function ensureSnapshotInjected(tabId: number): Promise<void> {
-  await browser.scripting.executeScript({
-    target: { tabId },
-    files: ["snapshot/inject.js"],
-    world: "MAIN" as browser.scripting.ExecutionWorld,
-  });
+interface ActionFeedbackInput {
+  url: string;
+  title: string;
+}
+
+function snapshotStorage(): SnapshotStorageArea | null {
+  const storage = browser.storage as unknown as { session?: SnapshotStorageArea };
+  return storage.session ?? null;
+}
+
+function snapshotStorageKey(tabId: number): string {
+  return `snapshot:${tabId}`;
+}
+
+async function persistSnapshotCache(
+  tabId: number,
+  map: Map<string, SnapshotUidEntry>,
+): Promise<void> {
+  const store = snapshotStorage();
+  if (!store) return;
+  await store.set({ [snapshotStorageKey(tabId)]: Array.from(map.values()) });
+}
+
+async function loadSnapshotCache(tabId: number): Promise<Map<string, SnapshotUidEntry> | null> {
+  const cached = snapshotCache.get(tabId);
+  if (cached) return cached;
+  const store = snapshotStorage();
+  if (!store) return null;
+  const data = await store.get(snapshotStorageKey(tabId));
+  const raw = data[snapshotStorageKey(tabId)];
+  if (!Array.isArray(raw)) return null;
+  const map = new Map<string, SnapshotUidEntry>();
+  for (const item of raw) {
+    const entry = item as Partial<SnapshotUidEntry>;
+    if (typeof entry.uid === "string" && typeof entry.css === "string") {
+      map.set(entry.uid, {
+        uid: entry.uid,
+        css: entry.css,
+        ...(typeof entry.xpath === "string" ? { xpath: entry.xpath } : {}),
+        ...(typeof entry.frameId === "number" ? { frameId: entry.frameId } : {}),
+      });
+    }
+  }
+  snapshotCache.set(tabId, map);
+  return map;
+}
+
+async function clearSnapshotCache(tabId: number): Promise<void> {
+  snapshotCache.delete(tabId);
+  const store = snapshotStorage();
+  if (store) await store.remove(snapshotStorageKey(tabId));
+}
+
+function clearTopFrameSnapshot(details: browser.webNavigation._OnCommittedDetails): void {
+  if (details.frameId === 0) void clearSnapshotCache(details.tabId);
+}
+
+browser.webNavigation.onCommitted.addListener(clearTopFrameSnapshot);
+browser.webNavigation.onHistoryStateUpdated.addListener(clearTopFrameSnapshot);
+browser.webNavigation.onReferenceFragmentUpdated.addListener(clearTopFrameSnapshot);
+browser.tabs.onRemoved.addListener((tabId) => void clearSnapshotCache(tabId));
+
+function isPrivilegedUrl(url: string): boolean {
+  return (
+    url.startsWith("about:") ||
+    url.startsWith("view-source:") ||
+    url.startsWith("moz-extension:") ||
+    url.startsWith("chrome:") ||
+    url.startsWith("resource:") ||
+    url.startsWith("https://addons.mozilla.org/")
+  );
+}
+
+async function scriptError(tabId: number, err: unknown): Promise<Error> {
+  const message = err instanceof Error ? err.message : String(err);
+  let url = "";
+  try {
+    url = (await browser.tabs.get(tabId)).url ?? "";
+  } catch {
+    // ignore
+  }
+  if (isPrivilegedUrl(url)) {
+    return new Error(
+      `this page type can't be scripted by extensions - not retryable (${url})`,
+    );
+  }
+  return new Error(message);
+}
+
+async function withTimeout<T>(
+  promise: Promise<T>,
+  timeoutMs: number,
+  message: string,
+): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new Error(message)), timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+async function ensureSnapshotInjected(tabId: number, allFrames: boolean): Promise<void> {
+  try {
+    await withTimeout(
+      browser.scripting.executeScript({
+        target: allFrames ? { tabId, allFrames: true } : { tabId },
+        files: ["snapshot/inject.js"],
+        world: "MAIN" as browser.scripting.ExecutionWorld,
+      }),
+      EXECUTE_SCRIPT_TIMEOUT_MS,
+      `snapshot injection did not finish within ${EXECUTE_SCRIPT_TIMEOUT_MS}ms`,
+    );
+  } catch (err) {
+    throw await scriptError(tabId, err);
+  }
 }
 
 async function executeInMain<T>(
   tabId: number,
-  func: (...args: unknown[]) => T,
+  func: (...args: unknown[]) => T | Promise<T>,
   args: unknown[],
+  opts: { frameId?: number } = {},
 ): Promise<T> {
-  const results = await browser.scripting.executeScript({
-    target: { tabId },
-    func,
-    args,
-    world: "MAIN" as browser.scripting.ExecutionWorld,
-  });
+  let results: browser.scripting.InjectionResult[];
+  try {
+    results = await withTimeout(
+      browser.scripting.executeScript({
+        target:
+          typeof opts.frameId === "number"
+            ? { tabId, frameIds: [opts.frameId] }
+            : { tabId },
+        func,
+        args,
+        world: "MAIN" as browser.scripting.ExecutionWorld,
+      }),
+      EXECUTE_SCRIPT_TIMEOUT_MS,
+      `page script did not finish within ${EXECUTE_SCRIPT_TIMEOUT_MS}ms; the page may be blocked by a dialog or a long-running main thread`,
+    );
+  } catch (err) {
+    throw await scriptError(tabId, err);
+  }
   const first = results[0];
   if (!first) throw new Error("no executeScript result");
   if (first.error) throw new Error(String(first.error));
   return first.result as T;
 }
 
-function lookupSelector(tabId: number, uid: string): string {
-  const map = snapshotCache.get(tabId);
+async function executeInAllFrames<T>(
+  tabId: number,
+  func: (...args: unknown[]) => T | Promise<T>,
+  args: unknown[],
+): Promise<browser.scripting.InjectionResult[]> {
+  try {
+    return await withTimeout(
+      browser.scripting.executeScript({
+        target: { tabId, allFrames: true },
+        func,
+        args,
+        world: "MAIN" as browser.scripting.ExecutionWorld,
+      }),
+      EXECUTE_SCRIPT_TIMEOUT_MS,
+      `page script did not finish within ${EXECUTE_SCRIPT_TIMEOUT_MS}ms; the page may be blocked by a dialog or a long-running main thread`,
+    );
+  } catch (err) {
+    throw await scriptError(tabId, err);
+  }
+}
+
+async function lookupUidEntry(tabId: number, uid: string): Promise<SnapshotUidEntry> {
+  const map = await loadSnapshotCache(tabId);
   if (!map) throw new Error(`no snapshot for tabId=${tabId}; call take_snapshot first`);
   const entry = map.get(uid);
   if (!entry) throw new Error(`uid "${uid}" not found in snapshot for tabId=${tabId}`);
-  return entry.css;
+  return entry;
 }
 
-function requireLocatorParams(raw: unknown): { tabId: number; locator: LocatorSpec } {
+function requireLocatorParams(raw: unknown): {
+  tabId: number;
+  locator: LocatorSpec;
+  timeoutMs?: number;
+} {
   const p = raw as LocatorParams;
   const tabId = requireNumber(p?.tabId, "tabId");
   const locator = p?.locator;
   if (!locator || (locator.kind !== "css" && locator.kind !== "xpath")) {
     throw new Error('locator must be {kind:"css",selector} or {kind:"xpath",expression}');
   }
-  return { tabId, locator };
+  return {
+    tabId,
+    locator,
+    ...(typeof p.timeoutMs === "number" ? { timeoutMs: p.timeoutMs } : {}),
+  };
 }
 
 function toCookieEntry(c: browser.cookies.Cookie): CookieEntry {
@@ -151,6 +317,604 @@ function toCookieEntry(c: browser.cookies.Cookie): CookieEntry {
   if (c.sameSite) entry.sameSite = c.sameSite as CookieEntry["sameSite"];
   if (c.storeId) entry.storeId = c.storeId;
   return entry;
+}
+
+function capText(text: string): string {
+  if (text.length <= PAGE_TEXT_MAX_CHARS) return text;
+  return `${text.slice(0, PAGE_TEXT_MAX_CHARS)}\n\n[truncated by extension at ${PAGE_TEXT_MAX_CHARS} chars]`;
+}
+
+async function collectFeedback(
+  tabId: number,
+  before: ActionFeedbackInput,
+): Promise<InteractionResult["feedback"]> {
+  let after: browser.tabs.Tab | null = null;
+  try {
+    after = await browser.tabs.get(tabId);
+  } catch {
+    // ignore
+  }
+  let activeElement: InteractionResult["feedback"]["activeElement"] | undefined;
+  try {
+    activeElement = await executeInMain(tabId, () => {
+      const el = document.activeElement as HTMLElement | null;
+      if (!el) return undefined;
+      const tag = el.tagName.toLowerCase();
+      const name =
+        el.getAttribute("aria-label") ||
+        el.getAttribute("name") ||
+        el.getAttribute("placeholder") ||
+        el.textContent?.replace(/\s+/g, " ").trim().slice(0, 80) ||
+        undefined;
+      return { tag, ...(name ? { name } : {}) };
+    }, []);
+  } catch {
+    activeElement = undefined;
+  }
+  const url = after?.url ?? before.url;
+  return {
+    url,
+    title: after?.title ?? before.title,
+    ...(activeElement ? { activeElement } : {}),
+    navigated: url !== before.url,
+  };
+}
+
+async function withFeedback(
+  tabId: number,
+  action: () => Promise<Omit<InteractionResult, "tabId" | "feedback"> | void>,
+): Promise<InteractionResult> {
+  const beforeTab = await browser.tabs.get(tabId);
+  const before = { url: beforeTab.url ?? "", title: beforeTab.title ?? "" };
+  const actionResult = (await action()) ?? {};
+  return {
+    tabId,
+    ...actionResult,
+    feedback: await collectFeedback(tabId, before),
+  };
+}
+
+// Runs a fill/type interaction, escalating on a failed rich-editor insert.
+// The injected command reports `filledStuck: false` only when both the trusted
+// execCommand path (disabled without document focus) and the synthetic
+// beforeinput path failed. In that case we bring the window to the front so the
+// trusted path is enabled, then retry once. This is the last-resort tier: it
+// steals OS focus, so it only fires when the quiet paths could not make the
+// text stick (rare — framework editors accept the synthetic path).
+async function runFillLike(
+  tabId: number,
+  command: Record<string, unknown>,
+  frameId?: number,
+): Promise<Record<string, unknown>> {
+  const first = await executeInMain<Record<string, unknown>>(
+    tabId,
+    runInteractionCommand,
+    [command],
+    { frameId },
+  );
+  if (first?.filledStuck !== false) return first;
+  try {
+    const tab = await browser.tabs.get(tabId);
+    if (tab.windowId !== undefined) {
+      await browser.windows.update(tab.windowId, { focused: true });
+    }
+    await browser.tabs.update(tabId, { active: true });
+    await new Promise((resolve) => setTimeout(resolve, 120));
+  } catch {
+    return first; // could not focus; surface the first attempt's result
+  }
+  return executeInMain<Record<string, unknown>>(tabId, runInteractionCommand, [command], {
+    frameId,
+  });
+}
+
+async function runInteractionCommand(raw: unknown): Promise<Record<string, unknown>> {
+  const command = raw as Record<string, any>;
+  const defaultTimeoutMs = 5_000;
+  const pollMs = 200;
+
+  const locatorLabel = (loc: LocatorSpec): string =>
+    loc.kind === "css" ? loc.selector : loc.expression;
+
+  const findByLocator = (loc: LocatorSpec): Element | null => {
+    if (loc.kind === "css") return document.querySelector(loc.selector);
+    return document.evaluate(
+      loc.expression,
+      document,
+      null,
+      XPathResult.FIRST_ORDERED_NODE_TYPE,
+      null,
+    ).singleNodeValue as Element | null;
+  };
+
+  const waitForLocator = async (
+    loc: LocatorSpec,
+    timeoutMs: number | undefined,
+  ): Promise<Element> => {
+    const total = typeof timeoutMs === "number" ? timeoutMs : defaultTimeoutMs;
+    const start = Date.now();
+    const deadline = start + total;
+    while (Date.now() <= deadline) {
+      const found = findByLocator(loc);
+      if (found) return found;
+      await new Promise((resolve) => setTimeout(resolve, pollMs));
+    }
+    throw new Error(`element not found: ${locatorLabel(loc)} after ${Date.now() - start}ms`);
+  };
+
+  const findBySelector = (selector: string): Element => {
+    const el = document.querySelector(selector);
+    if (!el) throw new Error(`element not found: ${selector}`);
+    return el;
+  };
+
+  const findTarget = async (): Promise<Element> => {
+    if (typeof command.selector === "string") return findBySelector(command.selector);
+    if (command.locator) {
+      return waitForLocator(command.locator as LocatorSpec, command.timeoutMs as number | undefined);
+    }
+    throw new Error("selector or locator is required");
+  };
+
+  const center = (el: Element): { x: number; y: number } => {
+    const rect = el.getBoundingClientRect();
+    return {
+      x: rect.left + Math.max(1, rect.width) / 2,
+      y: rect.top + Math.max(1, rect.height) / 2,
+    };
+  };
+
+  const scrollToElement = (el: Element): void => {
+    if ("scrollIntoView" in el) {
+      (el as HTMLElement).scrollIntoView({ block: "center", inline: "center" });
+    }
+  };
+
+  const setNativeValue = (input: HTMLInputElement | HTMLTextAreaElement, value: string): void => {
+    const proto = Object.getPrototypeOf(input);
+    const desc = Object.getOwnPropertyDescriptor(proto, "value");
+    if (desc?.set) desc.set.call(input, value);
+    else input.value = value;
+  };
+
+  // Fills a contentEditable and reports (via DOM readback) whether the text
+  // actually stuck. Tiered:
+  //   1. execCommand("insertText") — the fully-trusted path, but ONLY when the
+  //      document has system focus. Unfocused it lies (returns true, inserts
+  //      nothing on framework editors), so we gate it on document.hasFocus()
+  //      and never trust its return — we verify by reading the text back.
+  //   2. synthetic beforeinput + explicit Range — framework editors
+  //      (Lexical/ProseMirror/Slate) read the DOM selection, claim the
+  //      beforeinput (preventDefault) and reconcile into their own model
+  //      (~20ms, measured); plain contentEditables don't claim it, so we insert
+  //      the text node ourselves. Either way the verdict is the readback.
+  // A false return means neither path stuck -> the handler escalates (focus the
+  // window so tier 1 becomes usable, then retries).
+  const editableText = (el: HTMLElement, value: string): boolean => {
+    const text = el.textContent ?? "";
+    return value === "" ? text.trim() === "" : text.includes(value);
+  };
+  const settle = async (el: HTMLElement, value: string, capMs: number): Promise<boolean> => {
+    const deadline = Date.now() + capMs;
+    do {
+      if (editableText(el, value)) return true;
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    } while (Date.now() < deadline);
+    return editableText(el, value);
+  };
+  const richInsert = async (el: HTMLElement, value: string): Promise<boolean> => {
+    if (typeof el.focus === "function") el.focus();
+    if (document.hasFocus()) {
+      try {
+        document.execCommand("selectAll");
+        document.execCommand("insertText", false, value);
+      } catch {
+        // fall through to the synthetic path
+      }
+      if (await settle(el, value, 120)) return true;
+    }
+    try {
+      if (typeof el.focus === "function") el.focus();
+      const sel = window.getSelection();
+      const range = document.createRange();
+      range.selectNodeContents(el);
+      sel?.removeAllRanges();
+      sel?.addRange(range);
+      const beforeinput = new InputEvent("beforeinput", {
+        bubbles: true,
+        cancelable: true,
+        inputType: "insertText",
+        data: value,
+      });
+      const notClaimed = el.dispatchEvent(beforeinput);
+      if (notClaimed) {
+        // No framework handled it: perform the DOM edit and fire input ourselves.
+        const r = sel && sel.rangeCount ? sel.getRangeAt(0) : range;
+        r.deleteContents();
+        if (value) r.insertNode(document.createTextNode(value));
+        sel?.collapseToEnd();
+        el.dispatchEvent(
+          new InputEvent("input", { bubbles: true, inputType: "insertText", data: value }),
+        );
+      }
+      // If the editor claimed the beforeinput it inserts + fires input itself;
+      // dispatching another input here would double the text.
+    } catch {
+      // fall through to the readback verdict below
+    }
+    return settle(el, value, 500);
+  };
+
+  const fillElement = async (el: Element, value: string): Promise<boolean> => {
+    scrollToElement(el);
+    const html = el as HTMLElement;
+    const input = el as HTMLInputElement | HTMLTextAreaElement;
+    if ("value" in input && !html.isContentEditable) {
+      setNativeValue(input, value);
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+      input.dispatchEvent(new Event("change", { bubbles: true }));
+      return true;
+    } else if (html.isContentEditable) {
+      const stuck = await richInsert(html, value);
+      html.dispatchEvent(new Event("change", { bubbles: true }));
+      return stuck;
+    } else {
+      throw new Error("element is not fillable");
+    }
+  };
+
+  const pointerClick = (el: Element): void => {
+    scrollToElement(el);
+    const target = el as HTMLElement;
+    const point = center(el);
+    const pointerBase: PointerEventInit = {
+      bubbles: true,
+      cancelable: true,
+      clientX: point.x,
+      clientY: point.y,
+      button: 0,
+      pointerId: 1,
+      pointerType: "mouse",
+      isPrimary: true,
+    };
+    if (typeof PointerEvent === "function") {
+      target.dispatchEvent(new PointerEvent("pointerdown", { ...pointerBase, buttons: 1 }));
+    }
+    target.dispatchEvent(
+      new MouseEvent("mousedown", {
+        bubbles: true,
+        cancelable: true,
+        clientX: point.x,
+        clientY: point.y,
+        button: 0,
+        buttons: 1,
+      }),
+    );
+    if (typeof target.focus === "function") {
+      try {
+        target.focus({ preventScroll: true });
+      } catch {
+        target.focus();
+      }
+    }
+    if (typeof PointerEvent === "function") {
+      target.dispatchEvent(new PointerEvent("pointerup", { ...pointerBase, buttons: 0 }));
+    }
+    target.dispatchEvent(
+      new MouseEvent("mouseup", {
+        bubbles: true,
+        cancelable: true,
+        clientX: point.x,
+        clientY: point.y,
+        button: 0,
+        buttons: 0,
+      }),
+    );
+    target.dispatchEvent(
+      new MouseEvent("click", {
+        bubbles: true,
+        cancelable: true,
+        clientX: point.x,
+        clientY: point.y,
+        button: 0,
+      }),
+    );
+  };
+
+  const hoverElement = (el: Element): void => {
+    scrollToElement(el);
+    const target = el as HTMLElement;
+    const point = center(el);
+    const mouse: MouseEventInit = {
+      bubbles: true,
+      cancelable: true,
+      clientX: point.x,
+      clientY: point.y,
+    };
+    const pointer: PointerEventInit = {
+      ...mouse,
+      pointerId: 1,
+      pointerType: "mouse",
+      isPrimary: true,
+    };
+    if (typeof PointerEvent === "function") {
+      target.dispatchEvent(new PointerEvent("pointerover", pointer));
+      target.dispatchEvent(new PointerEvent("pointerenter", pointer));
+    }
+    target.dispatchEvent(new MouseEvent("mouseover", mouse));
+    target.dispatchEvent(new MouseEvent("mouseenter", mouse));
+    target.dispatchEvent(new MouseEvent("mousemove", mouse));
+  };
+
+  const typeChar = (editable: HTMLElement, ch: string): void => {
+    // execCommand only genuinely inserts when the document has focus; unfocused
+    // it lies (returns true, inserts nothing on framework editors), so gate it.
+    if (document.hasFocus()) {
+      try {
+        if (document.execCommand("insertText", false, ch)) return;
+      } catch {
+        // fall through to the synthetic path
+      }
+    }
+    const sel = window.getSelection();
+    const beforeinput = new InputEvent("beforeinput", {
+      bubbles: true,
+      cancelable: true,
+      inputType: "insertText",
+      data: ch,
+    });
+    if (!editable.dispatchEvent(beforeinput)) return; // editor claimed it
+    let range = sel && sel.rangeCount ? sel.getRangeAt(0) : null;
+    if (!range) {
+      range = document.createRange();
+      range.selectNodeContents(editable);
+      range.collapse(false);
+      sel?.removeAllRanges();
+      sel?.addRange(range);
+    }
+    range.deleteContents();
+    range.insertNode(document.createTextNode(ch));
+    range.collapse(false);
+    sel?.removeAllRanges();
+    sel?.addRange(range);
+    editable.dispatchEvent(
+      new InputEvent("input", { bubbles: true, inputType: "insertText", data: ch }),
+    );
+  };
+
+  const typeElement = async (
+    el: Element,
+    text: string,
+    delayMs: number,
+    clearFirst: boolean,
+  ): Promise<boolean> => {
+    scrollToElement(el);
+    const input = el as HTMLInputElement | HTMLTextAreaElement;
+    const focusable = el as HTMLElement;
+    const editable = focusable.isContentEditable;
+    if (clearFirst) {
+      if ("value" in input && !editable) {
+        setNativeValue(input, "");
+        input.dispatchEvent(new Event("input", { bubbles: true }));
+      } else if (editable) {
+        await richInsert(focusable, "");
+      }
+    }
+    if (typeof focusable.focus === "function") focusable.focus();
+    for (const ch of text) {
+      el.dispatchEvent(new KeyboardEvent("keydown", { key: ch, bubbles: true, cancelable: true }));
+      el.dispatchEvent(new KeyboardEvent("keypress", { key: ch, bubbles: true, cancelable: true }));
+      if ("value" in input && !editable) {
+        setNativeValue(input, `${input.value ?? ""}${ch}`);
+        input.dispatchEvent(new InputEvent("input", { bubbles: true, data: ch }));
+      } else if (editable) {
+        typeChar(focusable, ch);
+      }
+      el.dispatchEvent(new KeyboardEvent("keyup", { key: ch, bubbles: true }));
+      if (delayMs > 0) await new Promise((resolve) => setTimeout(resolve, delayMs));
+    }
+    if ("value" in input && !editable) {
+      input.dispatchEvent(new Event("change", { bubbles: true }));
+      return true;
+    }
+    if (editable) {
+      await new Promise((resolve) => setTimeout(resolve, 60));
+      const current = focusable.textContent ?? "";
+      return text === "" ? true : current.includes(text);
+    }
+    return true;
+  };
+
+  const dragElements = (from: Element, to: Element): void => {
+    scrollToElement(from);
+    scrollToElement(to);
+    const dt = new DataTransfer();
+    from.dispatchEvent(new DragEvent("dragstart", { dataTransfer: dt, bubbles: true }));
+    to.dispatchEvent(new DragEvent("dragenter", { dataTransfer: dt, bubbles: true }));
+    to.dispatchEvent(new DragEvent("dragover", { dataTransfer: dt, bubbles: true }));
+    to.dispatchEvent(new DragEvent("drop", { dataTransfer: dt, bubbles: true }));
+    from.dispatchEvent(new DragEvent("dragend", { dataTransfer: dt, bubbles: true }));
+  };
+
+  const pressKeys = async (): Promise<void> => {
+    const target = command.target as PressKeyParams["target"];
+    let el: Element | null = document.activeElement ?? document.body;
+    if (target?.kind === "locator") {
+      el = await waitForLocator(target.locator, command.timeoutMs as number | undefined);
+      scrollToElement(el);
+      if (typeof (el as HTMLElement).focus === "function") (el as HTMLElement).focus();
+    }
+    if (!el) throw new Error("no active element");
+    const spec = String(command.keys ?? "");
+    const parts = spec.split("+").map((p) => p.trim()).filter(Boolean);
+    const special: Record<string, string> = {
+      enter: "Enter",
+      return: "Enter",
+      escape: "Escape",
+      esc: "Escape",
+      tab: "Tab",
+      backspace: "Backspace",
+      delete: "Delete",
+      insert: "Insert",
+      space: " ",
+      arrowup: "ArrowUp",
+      up: "ArrowUp",
+      arrowdown: "ArrowDown",
+      down: "ArrowDown",
+      arrowleft: "ArrowLeft",
+      left: "ArrowLeft",
+      arrowright: "ArrowRight",
+      right: "ArrowRight",
+      home: "Home",
+      end: "End",
+      pageup: "PageUp",
+      pagedown: "PageDown",
+    };
+    const modifiers = new Set(["cmd", "meta", "ctrl", "control", "alt", "option", "shift"]);
+    const init: KeyboardEventInit = { bubbles: true, cancelable: true };
+    for (const m of parts.slice(0, -1)) {
+      const lower = m.toLowerCase();
+      if (!modifiers.has(lower)) throw new Error(`unknown modifier: ${m}`);
+      if (lower === "cmd" || lower === "meta") init.metaKey = true;
+      if (lower === "ctrl" || lower === "control") init.ctrlKey = true;
+      if (lower === "alt" || lower === "option") init.altKey = true;
+      if (lower === "shift") init.shiftKey = true;
+    }
+    const main = parts[parts.length - 1] ?? "";
+    init.key = special[main.toLowerCase()] ?? main;
+    el.dispatchEvent(new KeyboardEvent("keydown", init));
+    el.dispatchEvent(new KeyboardEvent("keypress", init));
+    el.dispatchEvent(new KeyboardEvent("keyup", init));
+  };
+
+  if (command.kind === "click") {
+    const el = await findTarget();
+    pointerClick(el);
+    return { matchedTag: (el as HTMLElement).tagName };
+  }
+  if (command.kind === "hover") {
+    const el = await findTarget();
+    hoverElement(el);
+    return { matchedTag: (el as HTMLElement).tagName };
+  }
+  if (command.kind === "fill") {
+    const el = await findTarget();
+    const stuck = await fillElement(el, String(command.value ?? ""));
+    return { matchedTag: (el as HTMLElement).tagName, filledStuck: stuck };
+  }
+  if (command.kind === "fillForm") {
+    const entries = command.entries as Array<{ selector: string; value: string }>;
+    let stuck = true;
+    for (const entry of entries) {
+      const one = await fillElement(findBySelector(entry.selector), entry.value);
+      stuck = one && stuck;
+    }
+    return { filledStuck: stuck };
+  }
+  if (command.kind === "type") {
+    const el = await findTarget();
+    const stuck = await typeElement(
+      el,
+      String(command.text ?? ""),
+      typeof command.delayMs === "number" ? command.delayMs : 0,
+      command.clearFirst === true,
+    );
+    return { matchedTag: (el as HTMLElement).tagName, filledStuck: stuck };
+  }
+  if (command.kind === "drag") {
+    const from =
+      typeof command.fromSelector === "string"
+        ? findBySelector(command.fromSelector)
+        : await waitForLocator(command.from as LocatorSpec, command.timeoutMs as number | undefined);
+    const to =
+      typeof command.toSelector === "string"
+        ? findBySelector(command.toSelector)
+        : await waitForLocator(command.to as LocatorSpec, command.timeoutMs as number | undefined);
+    dragElements(from, to);
+    return { matchedTag: (to as HTMLElement).tagName };
+  }
+  if (command.kind === "select") {
+    const el = await findTarget();
+    scrollToElement(el);
+    if ((el as HTMLElement).tagName !== "SELECT") {
+      return { ok: false, reason: "not_select", tag: (el as HTMLElement).tagName };
+    }
+    const sel = el as HTMLSelectElement;
+    let match: HTMLOptionElement | null = null;
+    for (let i = 0; i < sel.options.length; i++) {
+      const opt = sel.options[i] as HTMLOptionElement;
+      if (command.by === "value" && opt.value === command.value) match = opt;
+      if (command.by === "label" && opt.text === command.value) match = opt;
+      if (command.by === "index" && i === Number.parseInt(String(command.value), 10)) match = opt;
+      if (match) break;
+    }
+    if (!match) return { ok: false, reason: "no_match" };
+    sel.value = match.value;
+    sel.dispatchEvent(new Event("input", { bubbles: true }));
+    sel.dispatchEvent(new Event("change", { bubbles: true }));
+    return { ok: true, value: match.value, label: match.text };
+  }
+  if (command.kind === "press") {
+    await pressKeys();
+    return {};
+  }
+  throw new Error(`unknown interaction command: ${String(command.kind)}`);
+}
+
+async function runScrollCommand(raw: unknown): Promise<Omit<ScrollResult, "tabId">> {
+  const params = raw as Record<string, any>;
+  const pollMs = 200;
+  const defaultTimeoutMs = 5_000;
+  const findByLocator = (loc: LocatorSpec): Element | null => {
+    if (loc.kind === "css") return document.querySelector(loc.selector);
+    return document.evaluate(
+      loc.expression,
+      document,
+      null,
+      XPathResult.FIRST_ORDERED_NODE_TYPE,
+      null,
+    ).singleNodeValue as Element | null;
+  };
+  const waitForLocator = async (loc: LocatorSpec): Promise<Element> => {
+    const total = typeof params.timeoutMs === "number" ? params.timeoutMs : defaultTimeoutMs;
+    const start = Date.now();
+    const deadline = start + total;
+    while (Date.now() <= deadline) {
+      const found = findByLocator(loc);
+      if (found) return found;
+      await new Promise((resolve) => setTimeout(resolve, pollMs));
+    }
+    const label = loc.kind === "css" ? loc.selector : loc.expression;
+    throw new Error(`element not found: ${label} after ${Date.now() - start}ms`);
+  };
+
+  if (typeof params.selector === "string") {
+    const el = document.querySelector(params.selector);
+    if (!el) throw new Error(`element not found: ${params.selector}`);
+    el.scrollIntoView({ block: "center", inline: "center" });
+  } else if (params.locator) {
+    const el = await waitForLocator(params.locator as LocatorSpec);
+    el.scrollIntoView({ block: "center", inline: "center" });
+  } else {
+    const dx = typeof params.x === "number" ? params.x : 0;
+    let dy = typeof params.y === "number" ? params.y : 0;
+    if (typeof params.pages === "number") dy += params.pages * window.innerHeight;
+    window.scrollBy(dx, dy);
+  }
+
+  const doc = document.documentElement;
+  const maxX = Math.max(0, doc.scrollWidth - window.innerWidth);
+  const maxY = Math.max(0, doc.scrollHeight - window.innerHeight);
+  const x = window.scrollX;
+  const y = window.scrollY;
+  return {
+    x,
+    y,
+    atTop: y <= 0,
+    atBottom: y >= maxY - 1,
+    atLeft: x <= 0,
+    atRight: x >= maxX - 1,
+  };
 }
 
 export const handlers: Record<string, Handler> = {
@@ -233,50 +997,130 @@ export const handlers: Record<string, Handler> = {
   [Methods.PagesScreenshot]: async (raw): Promise<ScreenshotPageResult> => {
     const params = raw as ScreenshotPageParams;
     const tabId = requireNumber(params?.tabId, "tabId");
-    const dataUrl = await browser.tabs.captureTab(tabId, { format: "png" });
+    const format = params.format === "png" ? "png" : "jpeg";
+    const quality =
+      typeof params.quality === "number"
+        ? Math.max(0, Math.min(100, Math.round(params.quality)))
+        : 80;
+    const dataUrl = await browser.tabs.captureTab(tabId, { format, quality });
     return { tabId, dataUrl };
   },
 
   [Methods.DomTakeSnapshot]: async (raw): Promise<TakeSnapshotResult> => {
     const params = raw as TakeSnapshotParams;
     const tabId = requireNumber(params?.tabId, "tabId");
-    await ensureSnapshotInjected(tabId);
+    const includeIframes = params.includeIframes !== false;
+    await ensureSnapshotInjected(tabId, includeIframes);
     const snapshotId = nextSnapshotId++;
-    const result = await executeInMain<{
+    type FrameSnapshotResult = {
       tree: TakeSnapshotResult["tree"];
       uidMap: SnapshotUidEntry[];
       truncated: boolean;
       selectorError?: string;
-    }>(
-      tabId,
-      (id, opts) => {
-        const fn = (window as unknown as {
-          __zenExtMcpCreateSnapshot?: (i: number, o: unknown) => unknown;
-        }).__zenExtMcpCreateSnapshot;
-        if (!fn) throw new Error("snapshot fn not present");
-        return fn(id as number, opts) as never;
-      },
-      [snapshotId, { selector: params.selector, includeAll: params.includeAll, includeIframes: params.includeIframes }],
-    );
+      frameUrl?: string;
+    };
+    const capture = (id: unknown, opts: unknown): FrameSnapshotResult => {
+      const fn = (window as unknown as {
+        __zenExtMcpCreateSnapshot?: (i: number, o: unknown) => unknown;
+      }).__zenExtMcpCreateSnapshot;
+      if (!fn) throw new Error("snapshot fn not present");
+      const result = fn(id as number, opts) as FrameSnapshotResult;
+      return { ...result, frameUrl: window.location.href };
+    };
+    const snapshotOptions = {
+      selector: params.selector,
+      includeAll: params.includeAll,
+      includeIframes: false,
+    };
+    const results = includeIframes
+      ? await executeInAllFrames<FrameSnapshotResult>(tabId, capture, [
+          snapshotId,
+          snapshotOptions,
+        ])
+      : [
+          {
+            frameId: 0,
+            result: await executeInMain<FrameSnapshotResult>(tabId, capture, [
+              snapshotId,
+              snapshotOptions,
+            ]),
+          } as browser.scripting.InjectionResult,
+        ];
+
+    const rewriteUid = (uid: string, frameId: number): string => {
+      if (frameId === 0) return uid;
+      const prefix = `${snapshotId}_`;
+      const suffix = uid.startsWith(prefix) ? uid.slice(prefix.length) : uid;
+      return `${snapshotId}_f${frameId}_${suffix}`;
+    };
+    const rewriteTree = (
+      node: TakeSnapshotResult["tree"],
+      frameId: number,
+      frameUrl: string | undefined,
+    ): TakeSnapshotResult["tree"] => {
+      if (!node) return null;
+      const children = node.children
+        .map((child) => rewriteTree(child, frameId, undefined))
+        .filter((child): child is NonNullable<TakeSnapshotResult["tree"]> => child !== null);
+      const rewritten: TakeSnapshotResult["tree"] = {
+        ...node,
+        uid: rewriteUid(node.uid, frameId),
+        children,
+      };
+      if (frameId !== 0) {
+        rewritten.isIframe = true;
+        if (frameUrl) rewritten.frameSrc = frameUrl;
+      }
+      return rewritten;
+    };
 
     const uidMapByUid = new Map<string, SnapshotUidEntry>();
-    for (const entry of result.uidMap) uidMapByUid.set(entry.uid, entry);
+    const uidMap: SnapshotUidEntry[] = [];
+    let tree: TakeSnapshotResult["tree"] = null;
+    let truncated = false;
+    let selectorError: string | undefined;
+
+    for (const injection of results) {
+      if (injection.error || !injection.result) continue;
+      const frameId = injection.frameId ?? 0;
+      const result = injection.result as FrameSnapshotResult;
+      truncated = truncated || result.truncated;
+      if (result.selectorError && !selectorError) selectorError = result.selectorError;
+      for (const entry of result.uidMap) {
+        const rewritten = {
+          ...entry,
+          uid: rewriteUid(entry.uid, frameId),
+          ...(frameId !== 0 ? { frameId } : {}),
+        };
+        uidMap.push(rewritten);
+        uidMapByUid.set(rewritten.uid, rewritten);
+      }
+      const frameTree = rewriteTree(result.tree, frameId, result.frameUrl);
+      if (!frameTree) continue;
+      if (frameId === 0) {
+        tree = frameTree;
+      } else if (tree) {
+        tree.children.push(frameTree);
+      }
+    }
+
     snapshotCache.set(tabId, uidMapByUid);
+    await persistSnapshotCache(tabId, uidMapByUid);
 
     return {
       tabId,
       snapshotId,
-      tree: result.tree,
-      uidMap: result.uidMap,
-      truncated: result.truncated,
-      ...(result.selectorError ? { selectorError: result.selectorError } : {}),
+      tree,
+      uidMap,
+      truncated,
+      ...(selectorError && uidMap.length === 0 ? { selectorError } : {}),
     };
   },
 
   [Methods.DomClearSnapshot]: async (raw): Promise<TabIdResult> => {
     const params = raw as ClearSnapshotParams;
     const tabId = requireNumber(params?.tabId, "tabId");
-    snapshotCache.delete(tabId);
+    await clearSnapshotCache(tabId);
     return { tabId };
   },
 
@@ -284,138 +1128,92 @@ export const handlers: Record<string, Handler> = {
     const params = raw as UidActionParams;
     const tabId = requireNumber(params?.tabId, "tabId");
     const uid = requireString(params?.uid, "uid");
-    const map = snapshotCache.get(tabId);
-    if (!map) throw new Error(`no snapshot for tabId=${tabId}`);
-    const entry = map.get(uid);
-    if (!entry) throw new Error(`uid "${uid}" not in snapshot`);
+    const entry = await lookupUidEntry(tabId, uid);
     return entry;
   },
 
-  [Methods.DomClick]: async (raw): Promise<TabIdResult> => {
+  [Methods.DomClick]: async (raw): Promise<InteractionResult> => {
     const params = raw as UidActionParams;
     const tabId = requireNumber(params?.tabId, "tabId");
     const uid = requireString(params?.uid, "uid");
-    const selector = lookupSelector(tabId, uid);
-    await executeInMain(
-      tabId,
-      (sel) => {
-        const el = document.querySelector(sel as string) as HTMLElement | null;
-        if (!el) throw new Error(`element not found: ${sel}`);
-        el.click();
-      },
-      [selector],
+    const entry = await lookupUidEntry(tabId, uid);
+    return withFeedback(tabId, async () =>
+      executeInMain(
+        tabId,
+        runInteractionCommand,
+        [{ kind: "click", selector: entry.css }],
+        { frameId: entry.frameId },
+      ),
     );
-    return { tabId };
   },
 
-  [Methods.DomHover]: async (raw): Promise<TabIdResult> => {
+  [Methods.DomHover]: async (raw): Promise<InteractionResult> => {
     const params = raw as UidActionParams;
     const tabId = requireNumber(params?.tabId, "tabId");
     const uid = requireString(params?.uid, "uid");
-    const selector = lookupSelector(tabId, uid);
-    await executeInMain(
-      tabId,
-      (sel) => {
-        const el = document.querySelector(sel as string) as HTMLElement | null;
-        if (!el) throw new Error(`element not found: ${sel}`);
-        el.dispatchEvent(new MouseEvent("mouseover", { bubbles: true }));
-        el.dispatchEvent(new MouseEvent("mouseenter", { bubbles: true }));
-      },
-      [selector],
+    const entry = await lookupUidEntry(tabId, uid);
+    return withFeedback(tabId, async () =>
+      executeInMain(
+        tabId,
+        runInteractionCommand,
+        [{ kind: "hover", selector: entry.css }],
+        { frameId: entry.frameId },
+      ),
     );
-    return { tabId };
   },
 
-  [Methods.DomFill]: async (raw): Promise<TabIdResult> => {
+  [Methods.DomFill]: async (raw): Promise<InteractionResult> => {
     const params = raw as FillParams;
     const tabId = requireNumber(params?.tabId, "tabId");
     const uid = requireString(params?.uid, "uid");
     if (typeof params.value !== "string") throw new Error("value must be a string");
-    const selector = lookupSelector(tabId, uid);
-    await executeInMain(
-      tabId,
-      (sel, val) => {
-        const el = document.querySelector(sel as string) as HTMLElement | null;
-        if (!el) throw new Error(`element not found: ${sel}`);
-        const input = el as HTMLInputElement | HTMLTextAreaElement;
-        if ("value" in input) {
-          const proto = Object.getPrototypeOf(input);
-          const desc = Object.getOwnPropertyDescriptor(proto, "value");
-          if (desc?.set) desc.set.call(input, val);
-          else input.value = val as string;
-          input.dispatchEvent(new Event("input", { bubbles: true }));
-          input.dispatchEvent(new Event("change", { bubbles: true }));
-        } else if ((el as HTMLElement).isContentEditable) {
-          el.textContent = val as string;
-          el.dispatchEvent(new Event("input", { bubbles: true }));
-        } else {
-          throw new Error("element is not fillable");
-        }
-      },
-      [selector, params.value],
-    );
-    return { tabId };
+    const entry = await lookupUidEntry(tabId, uid);
+    return withFeedback(tabId, async () => {
+      const result = await runFillLike(
+        tabId,
+        { kind: "fill", selector: entry.css, value: params.value },
+        entry.frameId,
+      );
+      delete result.filledStuck;
+      return result;
+    });
   },
 
-  [Methods.DomFillForm]: async (raw): Promise<TabIdResult> => {
+  [Methods.DomFillForm]: async (raw): Promise<InteractionResult> => {
     const params = raw as FillFormParams;
     const tabId = requireNumber(params?.tabId, "tabId");
     if (!Array.isArray(params.fields)) throw new Error("fields must be an array");
-    const selectors = params.fields.map((f) => ({
-      selector: lookupSelector(tabId, f.uid),
-      value: f.value,
-    }));
-    await executeInMain(
-      tabId,
-      (entries) => {
-        const list = entries as Array<{ selector: string; value: string }>;
-        for (const { selector, value } of list) {
-          const el = document.querySelector(selector) as HTMLElement | null;
-          if (!el) throw new Error(`element not found: ${selector}`);
-          const input = el as HTMLInputElement | HTMLTextAreaElement;
-          if ("value" in input) {
-            const proto = Object.getPrototypeOf(input);
-            const desc = Object.getOwnPropertyDescriptor(proto, "value");
-            if (desc?.set) desc.set.call(input, value);
-            else input.value = value;
-            input.dispatchEvent(new Event("input", { bubbles: true }));
-            input.dispatchEvent(new Event("change", { bubbles: true }));
-          } else if ((el as HTMLElement).isContentEditable) {
-            el.textContent = value;
-            el.dispatchEvent(new Event("input", { bubbles: true }));
-          } else {
-            throw new Error(`element not fillable: ${selector}`);
-          }
-        }
-      },
-      [selectors],
-    );
-    return { tabId };
+    const groups = new Map<number | undefined, Array<{ selector: string; value: string }>>();
+    for (const field of params.fields) {
+      const entry = await lookupUidEntry(tabId, field.uid);
+      const list = groups.get(entry.frameId) ?? [];
+      list.push({ selector: entry.css, value: field.value });
+      groups.set(entry.frameId, list);
+    }
+    return withFeedback(tabId, async () => {
+      for (const [frameId, entries] of groups) {
+        await runFillLike(tabId, { kind: "fillForm", entries }, frameId);
+      }
+      return {};
+    });
   },
 
-  [Methods.DomDrag]: async (raw): Promise<TabIdResult> => {
+  [Methods.DomDrag]: async (raw): Promise<InteractionResult> => {
     const params = raw as DragParams;
     const tabId = requireNumber(params?.tabId, "tabId");
     const fromUid = requireString(params?.fromUid, "fromUid");
     const toUid = requireString(params?.toUid, "toUid");
-    const fromSel = lookupSelector(tabId, fromUid);
-    const toSel = lookupSelector(tabId, toUid);
-    await executeInMain(
-      tabId,
-      (a, b) => {
-        const from = document.querySelector(a as string) as HTMLElement | null;
-        const to = document.querySelector(b as string) as HTMLElement | null;
-        if (!from || !to) throw new Error("element not found for drag");
-        const dt = new DataTransfer();
-        from.dispatchEvent(new DragEvent("dragstart", { dataTransfer: dt, bubbles: true }));
-        to.dispatchEvent(new DragEvent("dragenter", { dataTransfer: dt, bubbles: true }));
-        to.dispatchEvent(new DragEvent("dragover", { dataTransfer: dt, bubbles: true }));
-        to.dispatchEvent(new DragEvent("drop", { dataTransfer: dt, bubbles: true }));
-        from.dispatchEvent(new DragEvent("dragend", { dataTransfer: dt, bubbles: true }));
-      },
-      [fromSel, toSel],
+    const from = await lookupUidEntry(tabId, fromUid);
+    const to = await lookupUidEntry(tabId, toUid);
+    if (from.frameId !== to.frameId) throw new Error("cannot drag across frames");
+    return withFeedback(tabId, async () =>
+      executeInMain(
+        tabId,
+        runInteractionCommand,
+        [{ kind: "drag", fromSelector: from.css, toSelector: to.css }],
+        { frameId: from.frameId },
+      ),
     );
-    return { tabId };
   },
 
   [Methods.DomGetPageText]: async (raw): Promise<GetPageTextResult> => {
@@ -436,17 +1234,25 @@ export const handlers: Record<string, Handler> = {
       },
       [selector ?? null],
     );
-    return { text };
+    return { text: capText(text) };
   },
 
   [Methods.DomReadPage]: async (raw): Promise<ReadPageResult> => {
     const params = raw as ReadPageParams;
     const tabId = requireNumber(params?.tabId, "tabId");
-    await browser.scripting.executeScript({
-      target: { tabId },
-      files: ["readability/inject.js"],
-      world: "MAIN" as browser.scripting.ExecutionWorld,
-    });
+    try {
+      await withTimeout(
+        browser.scripting.executeScript({
+          target: { tabId },
+          files: ["readability/inject.js"],
+          world: "MAIN" as browser.scripting.ExecutionWorld,
+        }),
+        EXECUTE_SCRIPT_TIMEOUT_MS,
+        `readability injection did not finish within ${EXECUTE_SCRIPT_TIMEOUT_MS}ms`,
+      );
+    } catch (err) {
+      throw await scriptError(tabId, err);
+    }
     const result = await executeInMain<ReadPageResult>(
       tabId,
       () => {
@@ -457,352 +1263,137 @@ export const handlers: Record<string, Handler> = {
       },
       [],
     );
+    if (typeof result.markdown === "string") result.markdown = capText(result.markdown);
     return result;
   },
 
-  [Methods.DomClickByLocator]: async (raw): Promise<TabIdResult> => {
-    const { tabId, locator } = requireLocatorParams(raw);
-    await executeInMain(
-      tabId,
-      (loc) => {
-        const l = loc as LocatorSpec;
-        const el =
-          l.kind === "css"
-            ? document.querySelector(l.selector)
-            : (document.evaluate(
-                l.expression,
-                document,
-                null,
-                XPathResult.FIRST_ORDERED_NODE_TYPE,
-                null,
-              ).singleNodeValue as Element | null);
-        if (!el) {
-          throw new Error(
-            `element not found: ${l.kind === "css" ? l.selector : l.expression}`,
-          );
-        }
-        (el as HTMLElement).click();
-      },
-      [locator],
+  [Methods.DomClickByLocator]: async (raw): Promise<InteractionResult> => {
+    const { tabId, locator, timeoutMs } = requireLocatorParams(raw);
+    return withFeedback(tabId, async () =>
+      executeInMain(tabId, runInteractionCommand, [
+        { kind: "click", locator, timeoutMs },
+      ]),
     );
-    return { tabId };
   },
 
-  [Methods.DomHoverByLocator]: async (raw): Promise<TabIdResult> => {
-    const { tabId, locator } = requireLocatorParams(raw);
-    await executeInMain(
-      tabId,
-      (loc) => {
-        const l = loc as LocatorSpec;
-        const el =
-          l.kind === "css"
-            ? document.querySelector(l.selector)
-            : (document.evaluate(
-                l.expression,
-                document,
-                null,
-                XPathResult.FIRST_ORDERED_NODE_TYPE,
-                null,
-              ).singleNodeValue as Element | null);
-        if (!el) {
-          throw new Error(
-            `element not found: ${l.kind === "css" ? l.selector : l.expression}`,
-          );
-        }
-        el.dispatchEvent(new MouseEvent("mouseover", { bubbles: true }));
-        el.dispatchEvent(new MouseEvent("mouseenter", { bubbles: true }));
-      },
-      [locator],
+  [Methods.DomHoverByLocator]: async (raw): Promise<InteractionResult> => {
+    const { tabId, locator, timeoutMs } = requireLocatorParams(raw);
+    return withFeedback(tabId, async () =>
+      executeInMain(tabId, runInteractionCommand, [
+        { kind: "hover", locator, timeoutMs },
+      ]),
     );
-    return { tabId };
   },
 
-  [Methods.DomFillByLocator]: async (raw): Promise<TabIdResult> => {
+  [Methods.DomFillByLocator]: async (raw): Promise<InteractionResult> => {
     const params = raw as FillByLocatorParams;
-    const { tabId, locator } = requireLocatorParams(params);
+    const { tabId, locator, timeoutMs } = requireLocatorParams(params);
     if (typeof params.value !== "string") throw new Error("value must be a string");
-    const value = params.value;
-    await executeInMain(
-      tabId,
-      (loc, val) => {
-        const l = loc as LocatorSpec;
-        const el =
-          l.kind === "css"
-            ? document.querySelector(l.selector)
-            : (document.evaluate(
-                l.expression,
-                document,
-                null,
-                XPathResult.FIRST_ORDERED_NODE_TYPE,
-                null,
-              ).singleNodeValue as Element | null);
-        if (!el) {
-          throw new Error(
-            `element not found: ${l.kind === "css" ? l.selector : l.expression}`,
-          );
-        }
-        const input = el as HTMLInputElement | HTMLTextAreaElement;
-        if ("value" in input) {
-          const proto = Object.getPrototypeOf(input);
-          const desc = Object.getOwnPropertyDescriptor(proto, "value");
-          if (desc?.set) desc.set.call(input, val as string);
-          else input.value = val as string;
-          input.dispatchEvent(new Event("input", { bubbles: true }));
-          input.dispatchEvent(new Event("change", { bubbles: true }));
-        } else if ((el as HTMLElement).isContentEditable) {
-          el.textContent = val as string;
-          el.dispatchEvent(new Event("input", { bubbles: true }));
-        } else {
-          throw new Error("element is not fillable");
-        }
-      },
-      [locator, value],
-    );
-    return { tabId };
+    return withFeedback(tabId, async () => {
+      const result = await runFillLike(tabId, {
+        kind: "fill",
+        locator,
+        value: params.value,
+        timeoutMs,
+      });
+      delete result.filledStuck;
+      return result;
+    });
   },
 
-  [Methods.DomTypeByLocator]: async (raw): Promise<TabIdResult> => {
+  [Methods.DomTypeByLocator]: async (raw): Promise<InteractionResult> => {
     const params = raw as TypeByLocatorParams;
-    const { tabId, locator } = requireLocatorParams(params);
+    const { tabId, locator, timeoutMs } = requireLocatorParams(params);
     if (typeof params.text !== "string") throw new Error("text must be a string");
-    const text = params.text;
-    const delayMs = typeof params.delayMs === "number" ? params.delayMs : 0;
-    const clearFirst = params.clearFirst === true;
-    await executeInMain(
-      tabId,
-      async (loc, t, delay, clear) => {
-        const l = loc as LocatorSpec;
-        const el =
-          l.kind === "css"
-            ? document.querySelector(l.selector)
-            : (document.evaluate(
-                l.expression,
-                document,
-                null,
-                XPathResult.FIRST_ORDERED_NODE_TYPE,
-                null,
-              ).singleNodeValue as Element | null);
-        if (!el) {
-          throw new Error(
-            `element not found: ${l.kind === "css" ? l.selector : l.expression}`,
-          );
-        }
-        const input = el as HTMLInputElement | HTMLTextAreaElement;
-        const focusable = el as HTMLElement;
-        if (clear === true && "value" in input) {
-          const proto = Object.getPrototypeOf(input);
-          const desc = Object.getOwnPropertyDescriptor(proto, "value");
-          if (desc?.set) desc.set.call(input, "");
-          else input.value = "";
-          input.dispatchEvent(new Event("input", { bubbles: true }));
-        }
-        if (typeof focusable.focus === "function") focusable.focus();
-        const str = t as string;
-        const d = typeof delay === "number" ? delay : 0;
-        for (const ch of str) {
-          const key = ch;
-          el.dispatchEvent(
-            new KeyboardEvent("keydown", { key, bubbles: true, cancelable: true }),
-          );
-          el.dispatchEvent(
-            new KeyboardEvent("keypress", { key, bubbles: true, cancelable: true }),
-          );
-          if ("value" in input) {
-            const proto = Object.getPrototypeOf(input);
-            const desc = Object.getOwnPropertyDescriptor(proto, "value");
-            const current =
-              typeof input.value === "string" ? (input.value as string) : "";
-            if (desc?.set) desc.set.call(input, current + ch);
-            else input.value = current + ch;
-            input.dispatchEvent(new InputEvent("input", { bubbles: true, data: ch }));
-          } else if (focusable.isContentEditable) {
-            focusable.textContent = (focusable.textContent ?? "") + ch;
-            focusable.dispatchEvent(
-              new InputEvent("input", { bubbles: true, data: ch }),
-            );
-          }
-          el.dispatchEvent(new KeyboardEvent("keyup", { key, bubbles: true }));
-          if (d > 0) await new Promise((r) => setTimeout(r, d));
-        }
-        if ("value" in input) {
-          input.dispatchEvent(new Event("change", { bubbles: true }));
-        }
-      },
-      [locator, text, delayMs, clearFirst],
-    );
-    return { tabId };
+    return withFeedback(tabId, async () => {
+      const result = await runFillLike(tabId, {
+        kind: "type",
+        locator,
+        text: params.text,
+        delayMs: typeof params.delayMs === "number" ? params.delayMs : 0,
+        clearFirst: params.clearFirst === true,
+        timeoutMs,
+      });
+      delete result.filledStuck;
+      return result;
+    });
   },
 
-  [Methods.DomDragByLocator]: async (raw): Promise<TabIdResult> => {
+  [Methods.DomDragByLocator]: async (raw): Promise<InteractionResult> => {
     const params = raw as DragByLocatorParams;
     const tabId = requireNumber(params?.tabId, "tabId");
     if (!params.from || !params.to) throw new Error("from and to are required");
-    const from = params.from;
-    const to = params.to;
-    await executeInMain(
-      tabId,
-      (f, t) => {
-        const findEl = (loc: LocatorSpec): Element | null => {
-          if (loc.kind === "css") return document.querySelector(loc.selector);
-          const r = document.evaluate(
-            loc.expression,
-            document,
-            null,
-            XPathResult.FIRST_ORDERED_NODE_TYPE,
-            null,
-          );
-          return r.singleNodeValue as Element | null;
-        };
-        const src = findEl(f as LocatorSpec);
-        const tgt = findEl(t as LocatorSpec);
-        if (!src || !tgt) throw new Error("element not found for drag");
-        const dt = new DataTransfer();
-        src.dispatchEvent(new DragEvent("dragstart", { dataTransfer: dt, bubbles: true }));
-        tgt.dispatchEvent(new DragEvent("dragenter", { dataTransfer: dt, bubbles: true }));
-        tgt.dispatchEvent(new DragEvent("dragover", { dataTransfer: dt, bubbles: true }));
-        tgt.dispatchEvent(new DragEvent("drop", { dataTransfer: dt, bubbles: true }));
-        src.dispatchEvent(new DragEvent("dragend", { dataTransfer: dt, bubbles: true }));
-      },
-      [from, to],
+    const timeoutMs = typeof params.timeoutMs === "number" ? params.timeoutMs : undefined;
+    return withFeedback(tabId, async () =>
+      executeInMain(tabId, runInteractionCommand, [
+        { kind: "drag", from: params.from, to: params.to, timeoutMs },
+      ]),
     );
-    return { tabId };
   },
 
   [Methods.DomSelectOptionByLocator]: async (raw): Promise<SelectOptionResult> => {
     const params = raw as SelectOptionByLocatorParams;
-    const { tabId, locator } = requireLocatorParams(params);
+    const { tabId, locator, timeoutMs } = requireLocatorParams(params);
     if (typeof params.value !== "string") throw new Error("value is required");
     if (params.by !== "value" && params.by !== "label" && params.by !== "index") {
       throw new Error('by must be "value", "label", or "index"');
     }
-    const by = params.by;
-    const value = params.value;
+    const beforeTab = await browser.tabs.get(tabId);
     const result = await executeInMain<SelectOptionResult>(
       tabId,
-      (loc, b, v) => {
-        const findEl = (l: LocatorSpec): Element | null => {
-          if (l.kind === "css") return document.querySelector(l.selector);
-          const r = document.evaluate(
-            l.expression,
-            document,
-            null,
-            XPathResult.FIRST_ORDERED_NODE_TYPE,
-            null,
-          );
-          return r.singleNodeValue as Element | null;
-        };
-        const el = findEl(loc as LocatorSpec);
-        if (!el) return { ok: false, reason: "not_found" };
-        if ((el as HTMLElement).tagName !== "SELECT") {
-          return { ok: false, reason: "not_select", tag: (el as HTMLElement).tagName };
-        }
-        const sel = el as HTMLSelectElement;
-        let match: HTMLOptionElement | null = null;
-        for (let i = 0; i < sel.options.length; i++) {
-          const opt = sel.options[i] as HTMLOptionElement;
-          if (b === "value" && opt.value === v) {
-            match = opt;
-            break;
-          }
-          if (b === "label" && opt.text === v) {
-            match = opt;
-            break;
-          }
-          if (b === "index" && i === parseInt(v as string, 10)) {
-            match = opt;
-            break;
-          }
-        }
-        if (!match) return { ok: false, reason: "no_match" };
-        sel.value = match.value;
-        sel.dispatchEvent(new Event("input", { bubbles: true }));
-        sel.dispatchEvent(new Event("change", { bubbles: true }));
-        return { ok: true, value: match.value, label: match.text };
-      },
-      [locator, by, value],
+      runInteractionCommand,
+      [{ kind: "select", locator, by: params.by, value: params.value, timeoutMs }],
     );
-    return result;
+    return {
+      ...result,
+      feedback: await collectFeedback(tabId, {
+        url: beforeTab.url ?? "",
+        title: beforeTab.title ?? "",
+      }),
+    };
   },
 
-  [Methods.DomPressKey]: async (raw): Promise<TabIdResult> => {
+  [Methods.DomPressKey]: async (raw): Promise<InteractionResult> => {
     const params = raw as PressKeyParams;
     const tabId = requireNumber(params?.tabId, "tabId");
     if (!params.keys || typeof params.keys !== "string") throw new Error("keys is required");
-    const keys = params.keys;
     const target = params.target ?? { kind: "active" };
-    await executeInMain(
-      tabId,
-      (k, tgt) => {
-        const findEl = (loc: LocatorSpec): Element | null => {
-          if (loc.kind === "css") return document.querySelector(loc.selector);
-          const r = document.evaluate(
-            loc.expression,
-            document,
-            null,
-            XPathResult.FIRST_ORDERED_NODE_TYPE,
-            null,
-          );
-          return r.singleNodeValue as Element | null;
-        };
-        const t = tgt as PressKeyParams["target"];
-        let el: Element | null;
-        if (t.kind === "locator") {
-          el = findEl(t.locator);
-          if (!el) {
-            const loc = t.locator;
-            throw new Error(
-              `element not found: ${loc.kind === "css" ? loc.selector : loc.expression}`,
-            );
-          }
-        } else {
-          el = document.activeElement ?? document.body;
-        }
-        const spec = k as string;
-        const parts = spec.split("+").map((p) => p.trim());
-        const SPECIAL: Record<string, string> = {
-          enter: "Enter",
-          return: "Enter",
-          escape: "Escape",
-          esc: "Escape",
-          tab: "Tab",
-          backspace: "Backspace",
-          delete: "Delete",
-          insert: "Insert",
-          space: " ",
-          arrowup: "ArrowUp",
-          up: "ArrowUp",
-          arrowdown: "ArrowDown",
-          down: "ArrowDown",
-          arrowleft: "ArrowLeft",
-          left: "ArrowLeft",
-          arrowright: "ArrowRight",
-          right: "ArrowRight",
-          home: "Home",
-          end: "End",
-          pageup: "PageUp",
-          pagedown: "PageDown",
-        };
-        const MOD = new Set(["cmd", "meta", "ctrl", "control", "alt", "option", "shift"]);
-        const init: KeyboardEventInit = { bubbles: true, cancelable: true };
-        let mainPart = parts[parts.length - 1] as string;
-        for (const m of parts.slice(0, -1)) {
-          const lower = m.toLowerCase();
-          if (!MOD.has(lower)) throw new Error(`unknown modifier: ${m}`);
-          if (lower === "cmd" || lower === "meta") init.metaKey = true;
-          if (lower === "ctrl" || lower === "control") init.ctrlKey = true;
-          if (lower === "alt" || lower === "option") init.altKey = true;
-          if (lower === "shift") init.shiftKey = true;
-        }
-        const lowerMain = mainPart.toLowerCase();
-        const key = SPECIAL[lowerMain] ?? mainPart;
-        init.key = key;
-        el.dispatchEvent(new KeyboardEvent("keydown", init));
-        el.dispatchEvent(new KeyboardEvent("keypress", init));
-        el.dispatchEvent(new KeyboardEvent("keyup", init));
-      },
-      [keys, target],
+    return withFeedback(tabId, async () =>
+      executeInMain(tabId, runInteractionCommand, [
+        {
+          kind: "press",
+          target,
+          keys: params.keys,
+          timeoutMs: typeof params.timeoutMs === "number" ? params.timeoutMs : undefined,
+        },
+      ]),
     );
-    return { tabId };
+  },
+
+  [Methods.DomScroll]: async (raw): Promise<ScrollResult> => {
+    const params = raw as ScrollParams;
+    const tabId = requireNumber(params?.tabId, "tabId");
+    const command: Record<string, unknown> = {};
+    let frameId: number | undefined;
+    if (params.uid) {
+      const entry = await lookupUidEntry(tabId, params.uid);
+      command.selector = entry.css;
+      frameId = entry.frameId;
+    } else if (params.locator) {
+      command.locator = params.locator;
+    } else {
+      if (typeof params.x === "number") command.x = params.x;
+      if (typeof params.y === "number") command.y = params.y;
+      if (typeof params.pages === "number") command.pages = params.pages;
+    }
+    if (typeof params.timeoutMs === "number") command.timeoutMs = params.timeoutMs;
+    const result = await executeInMain<Omit<ScrollResult, "tabId">>(
+      tabId,
+      runScrollCommand,
+      [command],
+      { frameId },
+    );
+    return { tabId, ...result };
   },
 
   [Methods.CookiesGet]: async (raw): Promise<GetCookiesResult> => {
@@ -822,6 +1413,7 @@ export const handlers: Record<string, Handler> = {
       throw new Error("cookies must be a non-empty array");
     }
     let set = 0;
+    const failures: NonNullable<SetCookiesResult["failures"]> = [];
     for (const c of params.cookies) {
       if (!c.url || !c.name || typeof c.value !== "string") {
         throw new Error("each cookie requires url, name, value");
@@ -838,10 +1430,26 @@ export const handlers: Record<string, Handler> = {
       if (typeof c.secure === "boolean") opts.secure = c.secure;
       if (c.sameSite) opts.sameSite = c.sameSite as browser.cookies.SameSiteStatus;
       if (c.storeId) opts.storeId = c.storeId;
-      await browser.cookies.set(opts);
-      set += 1;
+      try {
+        const result = await browser.cookies.set(opts);
+        if (result) {
+          set += 1;
+        } else {
+          failures.push({
+            name: c.name,
+            ...(c.domain ? { domain: c.domain } : {}),
+            reason: "browser.cookies.set returned null",
+          });
+        }
+      } catch (err) {
+        failures.push({
+          name: c.name,
+          ...(c.domain ? { domain: c.domain } : {}),
+          reason: (err as Error).message,
+        });
+      }
     }
-    return { set };
+    return { set, ...(failures.length > 0 ? { failures } : {}) };
   },
 
   [Methods.CookiesClear]: async (raw): Promise<ClearCookiesResult> => {
@@ -858,16 +1466,35 @@ export const handlers: Record<string, Handler> = {
     if (params.storeId) details.storeId = params.storeId;
     const list = await browser.cookies.getAll(details);
     let deleted = 0;
+    const failures: NonNullable<ClearCookiesResult["failures"]> = [];
     for (const c of list) {
+      const domain = c.domain.replace(/^\./, "");
+      const path = c.path || "/";
       const removeOpts: browser.cookies._RemoveDetailsType = {
-        url: details.url ?? `http${c.secure ? "s" : ""}://${c.domain}${c.path}`,
+        url: details.url ?? `http${c.secure ? "s" : ""}://${domain}${path}`,
         name: c.name,
       };
       if (c.storeId) removeOpts.storeId = c.storeId;
-      await browser.cookies.remove(removeOpts);
-      deleted += 1;
+      try {
+        const result = await browser.cookies.remove(removeOpts);
+        if (result) {
+          deleted += 1;
+        } else {
+          failures.push({
+            name: c.name,
+            ...(c.domain ? { domain: c.domain } : {}),
+            reason: "browser.cookies.remove returned null",
+          });
+        }
+      } catch (err) {
+        failures.push({
+          name: c.name,
+          ...(c.domain ? { domain: c.domain } : {}),
+          reason: (err as Error).message,
+        });
+      }
     }
-    return { deleted };
+    return { deleted, ...(failures.length > 0 ? { failures } : {}) };
   },
 
   [Methods.StorageGet]: async (raw): Promise<StorageGetResult> => {

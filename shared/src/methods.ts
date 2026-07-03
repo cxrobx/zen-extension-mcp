@@ -1,15 +1,12 @@
 export const Methods = {
   ContainersList: "containers.list",
-  ContainersSetDefault: "containers.setDefault",
   PagesList: "pages.list",
   PagesNew: "pages.new",
-  PagesNewInContainer: "pages.newInContainer",
   PagesNavigate: "pages.navigate",
   PagesSelect: "pages.select",
   PagesClose: "pages.close",
   PagesNavigateHistory: "pages.navigateHistory",
   PagesScreenshot: "pages.screenshot",
-  PagesSetViewportSize: "pages.setViewportSize",
   DomTakeSnapshot: "dom.takeSnapshot",
   DomClearSnapshot: "dom.clearSnapshot",
   DomClick: "dom.click",
@@ -28,6 +25,7 @@ export const Methods = {
   DomDragByLocator: "dom.dragByLocator",
   DomSelectOptionByLocator: "dom.selectOptionByLocator",
   DomPressKey: "dom.pressKey",
+  DomScroll: "dom.scroll",
   CookiesGet: "cookies.get",
   CookiesSet: "cookies.set",
   CookiesClear: "cookies.clear",
@@ -107,6 +105,7 @@ export interface SnapshotUidEntry {
   uid: string;
   css: string;
   xpath?: string;
+  frameId?: number;
 }
 
 export interface SnapshotNode {
@@ -131,6 +130,8 @@ export interface TakeSnapshotParams {
   selector?: string;
   includeAll?: boolean;
   includeIframes?: boolean;
+  maxBytes?: number;
+  cursor?: string;
 }
 
 export interface TakeSnapshotResult {
@@ -175,6 +176,8 @@ export interface ResolveUidResult {
 export interface EvaluateScriptParams {
   tabId: number;
   code: string;
+  maxBytes?: number;
+  cursor?: string;
 }
 
 export interface EvaluateScriptResult {
@@ -183,6 +186,8 @@ export interface EvaluateScriptResult {
 
 export interface ScreenshotPageParams {
   tabId: number;
+  format?: "jpeg" | "png";
+  quality?: number;
 }
 
 export interface ScreenshotPageResult {
@@ -230,6 +235,21 @@ export interface LocatorActionResult {
   matchedTag?: string;
 }
 
+export interface ActionFeedback {
+  url: string;
+  title: string;
+  activeElement?: {
+    tag: string;
+    name?: string;
+  };
+  navigated: boolean;
+}
+
+export interface InteractionResult extends TabIdResult {
+  matchedTag?: string;
+  feedback?: ActionFeedback;
+}
+
 export interface FillByLocatorParams extends LocatorParams {
   value: string;
 }
@@ -260,6 +280,7 @@ export interface SelectOptionResult {
   tag?: string;
   value?: string;
   label?: string;
+  feedback?: ActionFeedback;
 }
 
 export type PressKeyTarget =
@@ -271,6 +292,26 @@ export interface PressKeyParams {
   target: PressKeyTarget;
   keys: string;
   timeoutMs?: number;
+}
+
+export interface ScrollParams {
+  tabId: number;
+  x?: number;
+  y?: number;
+  pages?: number;
+  locator?: LocatorSpec;
+  uid?: string;
+  timeoutMs?: number;
+}
+
+export interface ScrollResult {
+  tabId: number;
+  x: number;
+  y: number;
+  atTop: boolean;
+  atBottom: boolean;
+  atLeft: boolean;
+  atRight: boolean;
 }
 
 export interface CookieEntry {
@@ -290,6 +331,8 @@ export interface GetCookiesParams {
   name?: string;
   domain?: string;
   storeId?: string;
+  maxBytes?: number;
+  cursor?: string;
 }
 
 export interface GetCookiesResult {
@@ -302,6 +345,7 @@ export interface SetCookiesParams {
 
 export interface SetCookiesResult {
   set: number;
+  failures?: Array<{ name: string; domain?: string; reason: string }>;
 }
 
 export interface ClearCookiesParams {
@@ -313,6 +357,7 @@ export interface ClearCookiesParams {
 
 export interface ClearCookiesResult {
   deleted: number;
+  failures?: Array<{ name: string; domain?: string; reason: string }>;
 }
 
 export type StorageKind = "local" | "session";
@@ -321,6 +366,8 @@ export interface StorageGetParams {
   tabId: number;
   kind: StorageKind;
   keys?: string[];
+  maxBytes?: number;
+  cursor?: string;
 }
 
 export interface StorageGetResult {

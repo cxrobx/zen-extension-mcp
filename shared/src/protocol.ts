@@ -1,6 +1,6 @@
 export const PROTOCOL_VERSION = 1;
 
-export const DEFAULT_DAEMON_PORT = 8765;
+export const DEFAULT_DAEMON_PORT = 8766;
 export const DEFAULT_DAEMON_HOST = "127.0.0.1";
 
 export type Role = "extension" | "client";

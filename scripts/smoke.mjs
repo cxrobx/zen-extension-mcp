@@ -6,6 +6,7 @@ import { dirname, resolve } from "node:path";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const root = resolve(here, "..");
+const TEST_PORT = "18766";
 
 function spawnLogged(name, cmd, args, opts = {}) {
   const child = spawn(cmd, args, { stdio: ["pipe", "pipe", "pipe"], ...opts });
@@ -47,13 +48,18 @@ function expectPipeJson(child, predicate, timeoutMs = 5000) {
 }
 
 async function main() {
-  const daemon = spawnLogged("daemon", "node", [resolve(root, "daemon/dist/index.js")]);
+  const daemon = spawnLogged("daemon", "node", [
+    resolve(root, "daemon/dist/index.js"),
+    "--port",
+    TEST_PORT,
+  ]);
   await sleep(500);
 
-  const mock = spawnLogged("mock-ext", "node", [resolve(here, "mock-extension.mjs")]);
-  await sleep(500);
-
-  const server = spawnLogged("mcp", "node", [resolve(root, "server/dist/index.js")]);
+  const server = spawnLogged("mcp", "node", [
+    resolve(root, "server/dist/index.js"),
+    "--port",
+    TEST_PORT,
+  ]);
   await sleep(500);
 
   const initialize = {
@@ -72,14 +78,19 @@ async function main() {
 
   server.stdin.write(JSON.stringify({ jsonrpc: "2.0", method: "notifications/initialized" }) + "\n");
 
-  const callTool = {
-    jsonrpc: "2.0",
-    id: 2,
-    method: "tools/call",
-    params: { name: "list_containers", arguments: {} },
-  };
-  server.stdin.write(JSON.stringify(callTool) + "\n");
-  const callResp = await expectPipeJson(server, (m) => m.id === 2);
+  server.stdin.write(
+    JSON.stringify({
+      jsonrpc: "2.0",
+      id: 2,
+      method: "tools/call",
+      params: { name: "list_containers", arguments: {} },
+    }) + "\n",
+  );
+  await sleep(500);
+  const mock = spawnLogged("mock-ext", "node", [resolve(here, "mock-extension.mjs")], {
+    env: { ...process.env, ZEN_EXT_MCP_URL: `ws://127.0.0.1:${TEST_PORT}` },
+  });
+  const callResp = await expectPipeJson(server, (m) => m.id === 2, 5000);
 
   const text = callResp.result?.content?.[0]?.text ?? "";
   console.error("[smoke] list_containers result:");
@@ -91,10 +102,27 @@ async function main() {
     throw new Error(`missing containers in response: ${missing.join(", ")}`);
   }
 
+  mock.kill("SIGTERM");
+  await sleep(500);
+
+  server.stdin.write(
+    JSON.stringify({
+      jsonrpc: "2.0",
+      id: 3,
+      method: "tools/call",
+      params: { name: "list_containers", arguments: {} },
+    }) + "\n",
+  );
+  const disconnectedResp = await expectPipeJson(server, (m) => m.id === 3, 7000);
+  const disconnectedText = disconnectedResp.result?.content?.[0]?.text ?? "";
+  if (!disconnectedResp.result?.isError || !disconnectedText.includes("extension not connected")) {
+    throw new Error(`expected queued request to fail after grace window, got: ${disconnectedText}`);
+  }
+  console.error("[smoke] disconnected grace failure ok");
+
   console.error("[smoke] PASS");
 
   server.kill("SIGTERM");
-  mock.kill("SIGTERM");
   daemon.kill("SIGTERM");
   await sleep(200);
   process.exit(0);

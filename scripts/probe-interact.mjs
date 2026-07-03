@@ -18,6 +18,8 @@ const FIXTURE_HTML = `<!doctype html>
     .box { padding: 1rem; border: 1px solid #ccc; margin: 1rem 0; }
     button { padding: 0.5rem 1rem; }
     input { padding: 0.4rem; margin: 0.25rem 0; display: block; width: 240px; }
+    #rich-editor { min-height: 3rem; padding: 0.5rem; border: 1px solid #aaa; }
+    .spacer { height: 1400px; }
     [data-hovered="yes"] { background: lime; }
   </style>
 </head>
@@ -29,18 +31,26 @@ const FIXTURE_HTML = `<!doctype html>
     <input id="text-input" type="text" placeholder="enter text">
     <input id="email-input" type="email" placeholder="enter email">
     <textarea id="ta" rows="3" placeholder="textarea"></textarea>
+    <div id="rich-editor" contenteditable="true" role="textbox" aria-label="Rich editor"></div>
   </div>
 
   <div class="box">
     <h2>Click</h2>
     <button id="click-btn" type="button">Click me</button>
     <div id="click-result">initial</div>
+    <button id="pointer-btn" type="button">Pointer only</button>
+    <div id="pointer-result">initial</div>
   </div>
 
   <div class="box">
     <h2>Hover</h2>
     <div id="hover-target">hover me</div>
   </div>
+
+  <div class="spacer"></div>
+  <button id="below-fold" type="button">Below fold</button>
+  <div id="below-result">initial</div>
+  <div id="delayed-root"></div>
 
   <script>
     const btn = document.getElementById('click-btn');
@@ -51,6 +61,41 @@ const FIXTURE_HTML = `<!doctype html>
     hover.addEventListener('mouseenter', () => {
       hover.dataset.hovered = 'yes';
     });
+    const rich = document.getElementById('rich-editor');
+    rich.addEventListener('beforeinput', (event) => {
+      event.preventDefault();
+      rich.dataset.beforeinput = 'yes';
+      rich.textContent = event.data || '';
+      rich.dispatchEvent(new InputEvent('input', {
+        bubbles: true,
+        data: event.data || '',
+        inputType: event.inputType || 'insertText'
+      }));
+    });
+    let pointerArmed = false;
+    const pointerBtn = document.getElementById('pointer-btn');
+    pointerBtn.addEventListener('pointerdown', () => {
+      pointerArmed = true;
+    });
+    pointerBtn.addEventListener('click', () => {
+      if (pointerArmed) document.getElementById('pointer-result').textContent = 'pointer clicked';
+      pointerArmed = false;
+    });
+    document.getElementById('below-fold').addEventListener('click', () => {
+      document.getElementById('below-result').textContent = 'below clicked';
+    });
+    window.startDelayedRender = () => {
+      setTimeout(() => {
+        const btn = document.createElement('button');
+        btn.id = 'delayed-btn';
+        btn.type = 'button';
+        btn.textContent = 'Delayed';
+        btn.addEventListener('click', () => {
+          btn.dataset.clicked = 'yes';
+        });
+        document.getElementById('delayed-root').appendChild(btn);
+      }, 700);
+    };
   </script>
 </body>
 </html>`;
@@ -241,6 +286,69 @@ async function main() {
   });
   console.log(`> hover-target dataset.hovered -> ${hoverData}`);
   if (hoverData !== "yes") throw new Error(`expected "yes", got ${hoverData}`);
+
+  await step("fill contenteditable mini-editor", async () => {
+    console.log(
+      await mcp.callTool("fill", {
+        pageIdx: idx,
+        selector: "#rich-editor",
+        value: "rich text sticks",
+      }),
+    );
+  });
+  const richState = await mcp.callTool("evaluate_script", {
+    pageIdx: idx,
+    code: "var el=document.getElementById('rich-editor'); return {text: el.textContent, beforeinput: el.dataset.beforeinput || null};",
+  });
+  console.log(`> rich editor -> ${richState}`);
+  if (!richState.includes("rich text sticks") || !richState.includes("yes")) {
+    throw new Error(`rich editor did not receive beforeinput-backed text: ${richState}`);
+  }
+
+  await step("pointer-event-only click by locator", async () => {
+    console.log(await mcp.callTool("click", { pageIdx: idx, selector: "#pointer-btn" }));
+  });
+  const pointerResult = await mcp.callTool("evaluate_script", {
+    pageIdx: idx,
+    code: "return document.getElementById('pointer-result').textContent;",
+  });
+  console.log(`> pointer-result -> "${pointerResult}"`);
+  if (pointerResult !== "pointer clicked") {
+    throw new Error(`expected pointer click, got "${pointerResult}"`);
+  }
+
+  await step("auto-scroll below-fold target", async () => {
+    console.log(await mcp.callTool("click", { pageIdx: idx, selector: "#below-fold" }));
+  });
+  const belowState = await mcp.callTool("evaluate_script", {
+    pageIdx: idx,
+    code: "return {result: document.getElementById('below-result').textContent, y: window.scrollY};",
+  });
+  console.log(`> below state -> ${belowState}`);
+  if (!belowState.includes("below clicked")) throw new Error(`below-fold click failed: ${belowState}`);
+  if (belowState.includes('"y": 0') || belowState.includes('"y":0')) {
+    throw new Error(`expected page to scroll before below-fold click: ${belowState}`);
+  }
+
+  await mcp.callTool("evaluate_script", {
+    pageIdx: idx,
+    code: "window.startDelayedRender(); return true;",
+  });
+  await step("auto-wait delayed locator", async () => {
+    console.log(
+      await mcp.callTool("click", {
+        pageIdx: idx,
+        selector: "#delayed-btn",
+        timeoutMs: 3000,
+      }),
+    );
+  });
+  const delayedClicked = await mcp.callTool("evaluate_script", {
+    pageIdx: idx,
+    code: "return document.getElementById('delayed-btn').dataset.clicked || null;",
+  });
+  console.log(`> delayed clicked -> ${delayedClicked}`);
+  if (delayedClicked !== "yes") throw new Error(`delayed click failed: ${delayedClicked}`);
 
   await mcp.callTool("close_page", { pageIdx: idx });
 

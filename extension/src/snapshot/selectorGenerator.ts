@@ -23,11 +23,19 @@ export function generateCssSelector(el: Element): string {
   while (current?.nodeType === Node.ELEMENT_NODE) {
     let selector = current.nodeName.toLowerCase();
 
-    // Check for preferred ID attributes
+    // Check for preferred ID attributes. Native IDs are terminal; test IDs often repeat in lists.
     let hasId = false;
+    let continueWithParent = false;
     for (const idAttr of PREFERRED_ID_ATTRS) {
       const value = current.getAttribute(idAttr);
       if (value) {
+        const candidate =
+          idAttr === 'id'
+            ? selector + '#' + CSS.escape(value)
+            : selector + `[${idAttr}="${escapeCssAttributeValue(value)}"]`;
+        const isTerminal =
+          idAttr === 'id' ||
+          (current.ownerDocument?.querySelectorAll(candidate).length ?? 0) === 1;
         if (idAttr === 'id') {
           selector += '#' + CSS.escape(value);
         } else {
@@ -35,11 +43,18 @@ export function generateCssSelector(el: Element): string {
         }
         path.unshift(selector);
         hasId = true;
+        if (!isTerminal) {
+          continueWithParent = true;
+        }
         break;
       }
     }
 
     if (hasId) {
+      if (continueWithParent) {
+        current = current.parentElement;
+        continue;
+      }
       break; // ID is unique, stop here
     }
 

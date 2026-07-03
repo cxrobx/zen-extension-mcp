@@ -22,15 +22,17 @@ Claude Code  --stdio-->  MCP server (per session, --container-scoped)
 | Multiple container-scoped MCP entries (`zen-cxv`, `zen-personal`, etc.) sharing one browser | Need full network capture with response bodies |
 | Browser must keep running uninterrupted | Need reliable `upload_file_by_uid` |
 
-The two coexist. They run different daemons by default. v1 of this project is **20 tools**; the rest of zen-mcp's surface stays where it is.
+The two coexist. They run different daemons by default. The current WebExtension surface is **38 tools**; privileged browser-control gaps stay in `zen-mcp`.
 
-## Tool surface (v1, 20 tools)
+## Tool surface
 
 | Bucket | Tools |
 |---|---|
 | **Containers** | `list_containers`, `set_default_container`, `new_page_in_container` |
 | **Pages** | `list_pages`, `new_page`, `navigate_page`, `select_page`, `close_page`, `navigate_history`, `screenshot_page` |
-| **DOM** | `take_snapshot`, `clear_snapshot`, `click_by_uid`, `hover_by_uid`, `fill_by_uid`, `fill_form_by_uid`, `drag_by_uid_to_uid`, `resolve_uid_to_selector`, `evaluate_script` |
+| **DOM read** | `take_snapshot`, `clear_snapshot`, `resolve_uid_to_selector`, `evaluate_script`, `get_page_text`, `read_page`, `find_by_text`, `wait_for` |
+| **DOM actions** | `click_by_uid`, `hover_by_uid`, `fill_by_uid`, `fill_form_by_uid`, `drag_by_uid_to_uid`, `click`, `hover`, `fill`, `type`, `drag`, `select_option`, `press_key`, `scroll` |
+| **Cookies/storage** | `get_cookies`, `set_cookies`, `clear_cookies`, `get_storage`, `set_storage`, `clear_storage` |
 | **Diagnostics** | `get_firefox_info` |
 
 Dropped from `zen-mcp` because no WebExtension equivalent: `list_privileged_contexts` / `select_privileged_context` / `evaluate_privileged_script`, `set_firefox_prefs` / `get_firefox_prefs`, `restart_firefox`, `upload_file_by_uid`, `install_extension` / `list_extensions` / `uninstall_extension`.
@@ -38,8 +40,10 @@ Dropped from `zen-mcp` because no WebExtension equivalent: `list_privileged_cont
 Deferred to v2 (need degraded-fidelity content-script bridges): `list_console_messages`, `clear_console_messages`, `list_network_requests`, `get_network_request`, `accept_dialog`, `dismiss_dialog`, `screenshot_by_uid`, full-page screenshot.
 
 Fidelity gaps to know:
-- `screenshot_page` captures the target tab's visible viewport in place via `tabs.captureTab(tabId)` — it does **not** activate the tab or change window focus.
+- `screenshot_page` captures the target tab's visible viewport in place via `tabs.captureTab(tabId)` — it does **not** activate the tab or change window focus. It defaults to JPEG quality 80; pass `format: "png"` for lossless output.
 - `evaluate_script` requires JSON-serializable args/results (the `scripting.executeScript` constraint). Returning DOM nodes or non-serializable objects fails.
+- Large textual responses from `take_snapshot`, `evaluate_script`, `get_page_text`, `read_page`, `get_cookies`, and `get_storage` honor `maxBytes` + `cursor`.
+- Locator actions (`click`, `hover`, `fill`, `type`, `drag`, `select_option`, `press_key`) auto-wait for matches with `timeoutMs` and scroll targets into view before acting.
 
 Focus behavior: automation is non-disruptive by default. `new_page` / `new_page_in_container` open tabs in the **background** (pass `active: true` to foreground), `navigate_page` and the DOM tools act on a tab by id without activating it, and `screenshot_page` captures without focus. The only tools that surface a tab to the foreground are `select_page` and an explicit `new_page(..., active: true)`. This means an MCP entry can drive one container (e.g. `zen-cxv`) while you browse in another (e.g. `zen-personal`) without your focus being stolen.
 
@@ -122,7 +126,7 @@ node daemon/dist/index.js --port 8766
 
 The daemon writes a 32-byte random token to `~/.config/zen-extension-mcp/auth.token` on first launch (mode 0600). All later launches reuse it.
 
-Default port is 8765 — many systems already have something there (`browsermcp`, `python -m http.server` for testing). If you collide, use `--port 8766`. Update the extension's options page URL to match.
+Default port is 8766. If you collide, use `--port <free-port>` and update the extension's options page URL to match.
 
 A simple launchd plist for keeping the daemon running:
 
@@ -167,7 +171,7 @@ claude mcp add zen-buildersbuddy node /abs/path/.../server/dist/index.js -- --po
 claude mcp add zen-personal     node /abs/path/.../server/dist/index.js -- --port 8766 --container Personal
 ```
 
-`--container <name>` resolves at server startup using the existing `zen-mcp` resolver: 0 matches errors with the available list; >1 matches errors with the matching list.
+`--container <name>` resolves lazily on first new-tab use using the existing `zen-mcp` resolver: 0 matches errors with the available list; >1 matches errors with the matching list.
 
 When `--container` is set, `new_page` defaults to that cookieStoreId. `new_page_in_container` always takes an explicit name. `set_default_container` updates the scope at runtime for that MCP entry. Both new-tab tools open in the background by default; pass `active: true` to foreground the tab.
 
@@ -191,9 +195,9 @@ The daemon binds the WebSocket port. Exactly **one** extension connection at a t
 
 ### Snapshot caching
 
-`take_snapshot` injects `extension/dist/snapshot/inject.js` via `scripting.executeScript({ files, world: 'MAIN' })`, then calls `window.__zenExtMcpCreateSnapshot`. The returned `uidMap` is cached in the background script keyed by tabId. Subsequent `click_by_uid`/`fill_by_uid`/etc. resolve uid -> selector via the cache, then run an inline action `func` against `document.querySelector(selector)`.
+`take_snapshot` injects `extension/dist/snapshot/inject.js` via `scripting.executeScript({ files, world: 'MAIN' })`, then calls `window.__zenExtMcpCreateSnapshot`. The returned `uidMap` is cached in the background script keyed by tabId and persisted in `browser.storage.session`, so UIDs survive routine MV3 background suspension. Subsequent `click_by_uid`/`fill_by_uid`/etc. resolve uid -> selector via the cache, then run an inline action `func` against `document.querySelector(selector)`.
 
-The cache is dropped on `webNavigation.onCommitted` (frame 0) and `tabs.onRemoved`. Take a fresh snapshot after any navigation.
+The cache is dropped on full navigation, SPA history updates, hash changes, and `tabs.onRemoved`. Take a fresh snapshot after any meaningful route change.
 
 ## Development loop
 

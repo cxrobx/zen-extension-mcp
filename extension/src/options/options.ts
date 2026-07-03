@@ -22,7 +22,11 @@ function renderStatus(state: unknown): void {
     return;
   }
   const status = (state as { status: string }).status;
-  statusEl.textContent = status;
+  const reason =
+    status === "error" && "reason" in state && typeof (state as { reason?: unknown }).reason === "string"
+      ? `: ${(state as { reason: string }).reason}`
+      : "";
+  statusEl.textContent = `${status}${reason}`;
   statusEl.className = "status";
   if (status === "authenticated") statusEl.classList.add("ok");
   if (status === "error") statusEl.classList.add("warn");
