@@ -1,6 +1,6 @@
 # zen-extension-mcp
 
-WebExtension-backed MCP for Zen / Firefox. Sister project to [`zen-mcp`](../zen-mcp), which uses Marionette/Selenium and requires launching the browser with flags. This one lives as a permanently-installed signed extension in your daily Zen — no flags, no restarts, container scoping per MCP entry.
+WebExtension-backed MCP for Zen / Firefox. Sister project to `zen-mcp` (a local fork of [`firefox-devtools-mcp`](https://github.com/mozilla/firefox-devtools-mcp)), which uses Marionette/Selenium and requires launching the browser with flags. This one lives as a permanently-installed signed extension in your daily Zen — no flags, no restarts, container scoping per MCP entry.
 
 ```
 Claude Code  --stdio-->  MCP server (per session, --container-scoped)
@@ -52,7 +52,7 @@ Focus behavior: automation is non-disruptive by default. `new_page` / `new_page_
 ## Build
 
 ```sh
-git clone /path/to/zen-extension-mcp
+git clone https://github.com/cxrobx/zen-extension-mcp.git
 cd zen-extension-mcp
 npm install
 npm run build
