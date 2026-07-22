@@ -19,6 +19,29 @@ const FIXTURE_CONTAINERS = [
   { cookieStoreId: "firefox-container-6", name: "CXVentures", color: "purple", icon: "briefcase" },
 ];
 
+const FIXTURE_PAGES = [
+  {
+    tabId: 101,
+    windowId: 1,
+    index: 0,
+    url: "https://example.com/",
+    title: "Example",
+    active: true,
+    cookieStoreId: "firefox-container-1",
+    containerName: "Personal",
+  },
+  {
+    tabId: 102,
+    windowId: 1,
+    index: 1,
+    url: "https://console.cloud.google.com/auth/clients/example",
+    title: "Cloud Console",
+    active: false,
+    cookieStoreId: "firefox-container-2",
+    containerName: "Work",
+  },
+];
+
 const ws = new WebSocket(url);
 
 ws.on("open", () => {
@@ -55,6 +78,61 @@ ws.on("message", (data) => {
           result: { containers: FIXTURE_CONTAINERS },
         }),
       );
+      return;
+    }
+    if (msg.method === "pages.list") {
+      ws.send(JSON.stringify({ type: "response", id: msg.id, result: { pages: FIXTURE_PAGES } }));
+      return;
+    }
+    if (msg.method === "pages.navigate") {
+      const page = FIXTURE_PAGES.find((item) => item.tabId === msg.params?.tabId);
+      if (page && typeof msg.params?.url === "string") page.url = msg.params.url;
+      ws.send(JSON.stringify({ type: "response", id: msg.id, result: { tabId: msg.params?.tabId } }));
+      return;
+    }
+    if (msg.method === "dom.fillByLocator") {
+      const page = FIXTURE_PAGES.find((item) => item.tabId === msg.params?.tabId) ?? FIXTURE_PAGES[0];
+      ws.send(JSON.stringify({
+        type: "response",
+        id: msg.id,
+        result: {
+          tabId: msg.params?.tabId,
+          matchedTag: "INPUT",
+          feedback: { url: page?.url ?? "https://example.com/", title: "Fixture", navigated: false },
+        },
+      }));
+      return;
+    }
+    if (msg.method === "dom.clickByLocator") {
+      const page = FIXTURE_PAGES.find((item) => item.tabId === msg.params?.tabId) ?? FIXTURE_PAGES[0];
+      if (page) page.url = "https://accounts.google.com/signin";
+      ws.send(JSON.stringify({
+        type: "response",
+        id: msg.id,
+        result: {
+          tabId: msg.params?.tabId,
+          matchedTag: "A",
+          feedback: { url: page?.url ?? "https://accounts.google.com/signin", title: "Accounts", navigated: true },
+        },
+      }));
+      return;
+    }
+    if (msg.method === "dom.takeSnapshot") {
+      ws.send(JSON.stringify({
+        type: "response",
+        id: msg.id,
+        result: {
+          tabId: msg.params?.tabId,
+          snapshotId: 1,
+          tree: {
+            uid: "root",
+            tag: "body",
+            children: [{ uid: "email", tag: "span", role: "status", text: "user@host.com", children: [] }],
+          },
+          uidMap: [{ uid: "email", css: "span.status" }],
+          truncated: false,
+        },
+      }));
       return;
     }
     ws.send(

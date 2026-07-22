@@ -33,6 +33,11 @@ export const Methods = {
   StorageSet: "storage.set",
   StorageClear: "storage.clear",
   InfoGet: "info.get",
+  NavMemoryQuery: "navMemory.query",
+  NavMemoryRecordEvents: "navMemory.recordEvents",
+  NavMemoryStats: "navMemory.stats",
+  NavMemoryForget: "navMemory.forget",
+  NavMemoryEtlNow: "navMemory.etlNow",
 } as const;
 
 export type MethodName = (typeof Methods)[keyof typeof Methods];

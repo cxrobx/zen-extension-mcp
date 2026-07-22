@@ -5,9 +5,10 @@ import { readFileSync } from "node:fs";
 import { parseArgs } from "./cli.js";
 import { DaemonClient, RpcError } from "./daemon-client.js";
 import { type ScopeRef, registerTools } from "./tools.js";
+import { NavContext } from "./nav-memory.js";
 
 const SERVER_NAME = "zen-ext-mcp";
-const SERVER_VERSION = "0.0.3";
+const SERVER_VERSION = "0.0.4";
 
 function logStderr(msg: string, fields?: Record<string, unknown>): void {
   const entry = { ts: new Date().toISOString(), source: "server", message: msg, ...fields };
@@ -62,11 +63,12 @@ async function main(): Promise<void> {
   }
 
   const server = new McpServer({ name: SERVER_NAME, version: SERVER_VERSION });
+  const nav = new NavContext(daemon, process.env.ZEN_EXT_MCP_NAV_MEMORY !== "0");
   registerTools(server, daemon, scope, {
     name: SERVER_NAME,
     version: SERVER_VERSION,
     daemonUrl: url,
-  });
+  }, nav);
 
   const transport = new StdioServerTransport();
   await server.connect(transport);

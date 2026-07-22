@@ -22,8 +22,8 @@ Claude Code  --stdio-->  MCP server (per session, --container-scoped)
                          MV3 extension (signed, in daily Zen)
 ```
 
-- **daemon/** — Node WS router. Single extension, N clients. Auth + ping.
-- **server/** — MCP stdio (`McpServer` from `@modelcontextprotocol/sdk`). Connects to daemon as a client. `--container <name>` resolves lazily on first new-tab use, mutable via `set_default_container`.
+- **daemon/** — Node WS router plus persistent nav-memory store/ETL. Single extension, N clients. Auth + ping.
+- **server/** — MCP stdio (`McpServer` from `@modelcontextprotocol/sdk`). Connects to daemon as a client, captures structural nav events, and injects advisory summaries once per host. `--container <name>` resolves lazily on first new-tab use, mutable via `set_default_container`.
 - **extension/** — MV3 background + options page + lazy-injected snapshot bundle.
 - **shared/** — Wire types, method-name constants, error codes. Single source of truth.
 
@@ -83,6 +83,9 @@ For installation specifically: `open -a "/Applications/Zen.app" <xpi>` triggers 
 | `scripts/probe-dom.mjs` | M3 read-side: snapshot, evaluate_script, resolve_uid, screenshot. Targets example.com. |
 | `scripts/probe-interact.mjs` | M3 write-side: click, hover, fill, fill_form, rich editor input, pointer sequence, auto-scroll, auto-wait against a self-served localhost fixture. |
 | `scripts/probe-info.mjs` | get_firefox_info with and without `--container` scope. |
+| `scripts/probe-navmem.mjs` | Scratch-store M0–M4: seeds, host isolation, injection, redaction, ETL, embeddings, stats, and forget. No live browser required. |
+
+For nav-memory work run `npm run test:nav-memory`, `node scripts/probe-navmem.mjs`, and the unchanged `node scripts/smoke.mjs`. The default ETL probe uses a fake tool-free Claude executable and fake Ollama endpoint; a live subscription is not a test prerequisite.
 
 After any extension change, run the relevant probe(s) — `npm run build` doesn't catch logic errors in handlers.
 
@@ -97,6 +100,8 @@ After any extension change, run the relevant probe(s) — `npm run build` doesn'
 - **Connect must be idempotent and resilient to stale ws.** `connect()` treats CLOSED/CLOSING as null. The keepalive uses `isHealthy()` (`ws.readyState === OPEN`) not the cached state field — state lies after asymmetric WS shutdown.
 - **`evaluate_script`** wraps user code with `new Function(code)()`. User provides function body, uses `return` for the result, must be JSON-serializable. DOM nodes fail.
 - **AMO signing** rejects re-uploads of an already-signed version. Always bump the manifest version, and check AMO for the highest version (curl + jq snippet above) before deciding what to bump to — local artifacts can lag behind what AMO has on file.
+- **Nav-memory ETL receives untrusted browser telemetry.** Production invocation must retain the empty temporary cwd, `--safe-mode`, `--tools ""`, schema-constrained output, minimal environment, timeout, and no-session-persistence flags. Do not add an agentic Codex fallback.
+- **Nav-memory raw data stays structural.** Never add generic text hints, fill/type/select values, find queries, page content, evaluated code, cookie/storage values, or arbitrary error messages to `NavEventRecord`.
 - **In-place extension upgrades occasionally no-op silently.** Always confirm the new version in `about:addons` after install. If stuck, remove the existing extension (`⋯ → Remove`) and re-run `open -a "/Applications/Zen.app" <xpi>`; that's reliable for a clean install. The localhost-XPI-server flow (step 7 of the iteration loop) is a deeper fallback if even `open -a` produces nothing.
 
 ## Where things live
@@ -106,6 +111,8 @@ After any extension change, run the relevant probe(s) — `npm run build` doesn'
 | RPC types + method names | `shared/src/methods.ts`, `shared/src/protocol.ts` |
 | Error codes + `ZenToolError` | `shared/src/errors.ts`, `server/src/errors.ts` |
 | Daemon WS routing + auth | `daemon/src/index.ts` |
+| Nav-memory store, service, ETL, ranking | `daemon/src/nav-memory/` |
+| Nav-memory capture and injection | `server/src/nav-memory.ts` |
 | MCP tool registrations | `server/src/tools.ts` |
 | Locator-prefix parser (`css:`/`xpath:`/`text:`/`text*:`/`role:`) | `server/src/locator.ts` |
 | Container resolver (ported from `zen-mcp`) | `server/src/container.ts` |

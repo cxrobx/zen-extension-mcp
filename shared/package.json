@@ -8,10 +8,21 @@
     ".": {
       "types": "./dist/index.d.ts",
       "default": "./dist/index.js"
+    },
+    "./nav-memory": {
+      "types": "./dist/nav-memory.d.ts",
+      "default": "./dist/nav-memory.js"
+    },
+    "./nav-redact": {
+      "types": "./dist/nav-redact.d.ts",
+      "default": "./dist/nav-redact.js"
     }
   },
   "scripts": {
     "build": "tsc -b",
     "clean": "rm -rf dist *.tsbuildinfo"
+  },
+  "dependencies": {
+    "tldts": "^7.0.14"
   }
 }

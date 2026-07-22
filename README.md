@@ -22,7 +22,7 @@ Claude Code  --stdio-->  MCP server (per session, --container-scoped)
 | Multiple container-scoped MCP entries (`zen-cxv`, `zen-personal`, etc.) sharing one browser | Need full network capture with response bodies |
 | Browser must keep running uninterrupted | Need reliable `upload_file_by_uid` |
 
-The two coexist. They run different daemons by default. The current WebExtension surface is **38 tools**; privileged browser-control gaps stay in `zen-mcp`.
+The two coexist. They run different daemons by default. The current surface is **41 tools** (38 browser tools plus 3 local navigation-memory tools); privileged browser-control gaps stay in `zen-mcp`.
 
 ## Tool surface
 
@@ -34,6 +34,7 @@ The two coexist. They run different daemons by default. The current WebExtension
 | **DOM actions** | `click_by_uid`, `hover_by_uid`, `fill_by_uid`, `fill_form_by_uid`, `drag_by_uid_to_uid`, `click`, `hover`, `fill`, `type`, `drag`, `select_option`, `press_key`, `scroll` |
 | **Cookies/storage** | `get_cookies`, `set_cookies`, `clear_cookies`, `get_storage`, `set_storage`, `clear_storage` |
 | **Diagnostics** | `get_firefox_info` |
+| **Navigation memory** | `get_domain_playbook`, `nav_memory_stats`, `nav_memory_forget` |
 
 Dropped from `zen-mcp` because no WebExtension equivalent: `list_privileged_contexts` / `select_privileged_context` / `evaluate_privileged_script`, `set_firefox_prefs` / `get_firefox_prefs`, `restart_firefox`, `upload_file_by_uid`, `install_extension` / `list_extensions` / `uninstall_extension`.
 
@@ -52,6 +53,8 @@ Focus behavior: automation is non-disruptive by default. `new_page` / `new_page_
 - Node 20+
 - Zen browser (Firefox 115+ derivative) — works in stock Firefox too
 - An [AMO](https://addons.mozilla.org) account (free) for signing the extension
+- Optional: Claude Code CLI subscription auth for background navigation-note distillation
+- Optional: Ollama with `nomic-embed-text` for semantic deduplication and playbook search
 
 ## Build
 
@@ -128,6 +131,8 @@ The daemon writes a 32-byte random token to `~/.config/zen-extension-mcp/auth.to
 
 Default port is 8766. If you collide, use `--port <free-port>` and update the extension's options page URL to match.
 
+Navigation memory defaults to `~/.config/zen-extension-mcp/nav-memory/`. Override it with `--nav-db <dir>` or `ZEN_EXT_MCP_NAV_DB`; override the distiller executable with `--claude-bin <path>` or `ZEN_EXT_MCP_CLAUDE_BIN`. Set `ZEN_EXT_MCP_NAV_MEMORY=0` on an MCP server process to disable new capture and automatic note injection while retaining the explicit playbook tools.
+
 A simple launchd plist for keeping the daemon running:
 
 ```xml
@@ -193,6 +198,16 @@ Two MCP entries calling `new_page` simultaneously each open their own tab in the
 
 The daemon binds the WebSocket port. Exactly **one** extension connection at a time (a new hello with role=extension replaces the old one and fails its in-flight requests). Many clients. Extension-bound requests are routed by request id; a per-id timer fails the call after 30s.
 
+### Navigation memory
+
+The server records only bounded structural facts such as normalized URL shapes, sanitized locators, tool success, navigation, match counts, and stable error codes. It never records entered form values, cookie/storage values, page bodies, evaluated code, find queries, screenshots, or arbitrary error text. Events stream to the daemon during the session; disconnect atomically finalizes one pending work file per host.
+
+The daemon stores notes in an atomic, versioned JSON document and ranks exact-host observations before public-suffix-aware related hosts. Path-scoped notes are injected only on matching paths. Injection is summary-only, capped at 1.5 KiB, framed as advisory data, and occurs once per host per MCP process. `get_domain_playbook` returns the complete reviewed context on demand.
+
+Pending telemetry is distilled in an empty temporary directory by `claude -p --safe-mode --tools "" --no-session-persistence` with schema-constrained output. There is no agentic fallback. Ollama is optional: when unavailable, deterministic ranking and normalized-text deduplication remain active, and missing embeddings are backfilled later.
+
+State directories are mode `0700` and files are `0600`. Pending work is capped at 200 files; failed work at 50; both expire after 30 days. `nav_memory_forget` deletes a note or an exact host, including its raw work by default. Forgetting a trusted seed creates a durable tombstone. Export is a copy of `notes.json`; for import, stop the daemon, replace that file with mode `0600`, and restart.
+
 ### Snapshot caching
 
 `take_snapshot` injects `extension/dist/snapshot/inject.js` via `scripting.executeScript({ files, world: 'MAIN' })`, then calls `window.__zenExtMcpCreateSnapshot`. The returned `uidMap` is cached in the background script keyed by tabId and persisted in `browser.storage.session`, so UIDs survive routine MV3 background suspension. Subsequent `click_by_uid`/`fill_by_uid`/etc. resolve uid -> selector via the cache, then run an inline action `func` against `document.querySelector(selector)`.
@@ -205,6 +220,14 @@ For non-prod iteration, skip AMO signing — load the extension as a temporary a
 
 ```sh
 npm run extension:run
+```
+
+Navigation-memory verification is local and deterministic:
+
+```sh
+npm run test:nav-memory
+node scripts/probe-navmem.mjs
+node scripts/smoke.mjs
 ```
 
 This opens a fresh Firefox profile with `extension/dist/` loaded as a temporary extension, no signing required. The extension is gone after the dev profile closes — fine for development.
@@ -229,6 +252,7 @@ When iterating on extension code with the signed install in production: rebuild 
 - Auth token is the only thing that gates the extension's tool surface from other processes on the same machine. Treat it like any other local credential.
 - The signed extension has `<all_urls>` host permission (gated behind explicit user opt-in for site-data access). It can therefore script any page you visit. Don't grant it lightly.
 - `evaluate_script` runs arbitrary user-provided JS in the page's MAIN world. The MCP token gates who can call it. There is no per-tool permission check beyond auth.
+- Navigation memory is privacy-minimized advisory state, not a proof that arbitrary PII can never occur. Defense comes from structural allowlists, two-stage redaction, local-only permissions, bounded retention, explicit purge controls, and deterministic planted-secret tests.
 
 ## License
 

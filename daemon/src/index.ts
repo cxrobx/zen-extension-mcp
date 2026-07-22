@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import { WebSocketServer, type WebSocket } from "ws";
 import { randomUUID } from "node:crypto";
+import { dirname, join } from "node:path";
 import {
   DEFAULT_DAEMON_HOST,
   DEFAULT_DAEMON_PORT,
@@ -14,6 +15,10 @@ import {
 } from "@zen-ext-mcp/shared";
 import { defaultAuthPath, loadOrCreateToken, tokensEqual } from "./auth.js";
 import { log } from "./log.js";
+import { ClaudeDistiller } from "./nav-memory/distill.js";
+import { OllamaEmbedder } from "./nav-memory/embeddings.js";
+import { NavMemoryService, NavServiceError } from "./nav-memory/service.js";
+import { JsonNavStore } from "./nav-memory/store.js";
 
 const HEARTBEAT_INTERVAL_MS = 30_000;
 const HELLO_TIMEOUT_MS = 5_000;
@@ -25,12 +30,16 @@ interface CliOptions {
   port: number;
   host: string;
   tokenPath: string;
+  navDbPath: string;
+  claudeBin: string;
 }
 
 function parseArgs(argv: string[]): CliOptions {
   let port = DEFAULT_DAEMON_PORT;
   let host = DEFAULT_DAEMON_HOST;
   let tokenPath = defaultAuthPath();
+  let navDbPath = process.env.ZEN_EXT_MCP_NAV_DB ?? join(dirname(defaultAuthPath()), "nav-memory");
+  let claudeBin = process.env.ZEN_EXT_MCP_CLAUDE_BIN ?? "claude";
   const envPort = process.env.ZEN_EXT_MCP_PORT;
   if (envPort) port = Number.parseInt(envPort, 10);
   const envHost = process.env.ZEN_EXT_MCP_HOST;
@@ -45,12 +54,16 @@ function parseArgs(argv: string[]): CliOptions {
       host = argv[++i] ?? host;
     } else if (arg === "--token-file" && argv[i + 1]) {
       tokenPath = argv[++i] ?? tokenPath;
+    } else if (arg === "--nav-db" && argv[i + 1]) {
+      navDbPath = argv[++i] ?? navDbPath;
+    } else if (arg === "--claude-bin" && argv[i + 1]) {
+      claudeBin = argv[++i] ?? claudeBin;
     }
   }
   if (!Number.isFinite(port) || port <= 0 || port > 65535) {
     throw new Error(`invalid port: ${port}`);
   }
-  return { port, host, tokenPath };
+  return { port, host, tokenPath, navDbPath, claudeBin };
 }
 
 interface PendingRequest {
@@ -84,9 +97,13 @@ class Daemon {
   private queuedForExtension: QueuedRequest[] = [];
   private heartbeat: NodeJS.Timeout | null = null;
   private queueSweep: NodeJS.Timeout | null = null;
+  private navMemoryTick: NodeJS.Timeout | null = null;
   readonly serverId = randomUUID();
 
-  constructor(private readonly token: string) {}
+  constructor(
+    private readonly token: string,
+    private readonly navMemory: NavMemoryService,
+  ) {}
 
   start(host: string, port: number): Promise<void> {
     return new Promise((resolve, reject) => {
@@ -103,6 +120,11 @@ class Daemon {
         () => this.sweepExpiredQueuedRequests(),
         QUEUE_SWEEP_INTERVAL_MS,
       );
+      this.navMemoryTick = setInterval(() => {
+        void this.navMemory.tick().catch((err) => {
+          log.warn("nav-memory tick failed", { err: (err as Error).message });
+        });
+      }, 60_000);
     });
   }
 
@@ -225,6 +247,10 @@ class Daemon {
       });
       return;
     }
+    if (msg.method.startsWith("navMemory.")) {
+      void this.handleNavMemory(conn, msg);
+      return;
+    }
     if (!this.extension) {
       this.queuedForExtension.push({
         clientId: conn.id,
@@ -234,6 +260,22 @@ class Daemon {
       return;
     }
     this.forwardToExtension(conn, msg);
+  }
+
+  private async handleNavMemory(conn: Connection, msg: RequestMessage): Promise<void> {
+    try {
+      const result = await this.navMemory.handleRequest(
+        { connId: conn.id, containerScope: conn.containerScope ?? null },
+        msg.method,
+        msg.params,
+      );
+      this.respond(conn, msg.id, result);
+    } catch (err) {
+      const error = err instanceof NavServiceError
+        ? { code: err.code, message: err.message }
+        : { code: ErrorCode.InternalError, message: (err as Error).message };
+      this.respond(conn, msg.id, undefined, error);
+    }
   }
 
   private forwardToExtension(conn: Connection, msg: RequestMessage): void {
@@ -338,6 +380,9 @@ class Daemon {
         connId: conn.id,
         containerScope: conn.containerScope ?? null,
       });
+      void this.navMemory.onSessionEnd(conn.id).catch((err) => {
+        log.warn("nav-memory session finalize failed", { connId: conn.id, err: (err as Error).message });
+      });
     }
   }
 
@@ -399,9 +444,11 @@ class Daemon {
   async stop(): Promise<void> {
     if (this.heartbeat) clearInterval(this.heartbeat);
     if (this.queueSweep) clearInterval(this.queueSweep);
+    if (this.navMemoryTick) clearInterval(this.navMemoryTick);
     if (this.wss) {
       await new Promise<void>((resolve) => this.wss!.close(() => resolve()));
     }
+    await this.navMemory.stop();
   }
 }
 
@@ -410,7 +457,16 @@ async function main(): Promise<void> {
   const token = loadOrCreateToken(opts.tokenPath);
   log.info("auth token loaded", { path: opts.tokenPath });
 
-  const daemon = new Daemon(token);
+  const navStore = new JsonNavStore(opts.navDbPath);
+  const navMemory = new NavMemoryService(
+    navStore,
+    new ClaudeDistiller(opts.claudeBin),
+    new OllamaEmbedder(),
+  );
+  await navMemory.init();
+  log.info("nav-memory ready", { dir: opts.navDbPath, notes: navStore.noteCount() });
+
+  const daemon = new Daemon(token, navMemory);
   await daemon.start(opts.host, opts.port);
 
   const shutdown = async (signal: string) => {
