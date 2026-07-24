@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import {
@@ -103,13 +104,96 @@ function truncateOneLine(value: string | undefined, maxLen: number): string {
   return oneLine.slice(0, maxLen - 3) + "...";
 }
 
-async function resolvePageIdx(daemon: DaemonClient, pageIdx: number): Promise<PageInfo> {
-  const pages = await listPages(daemon);
+// Zen Workspaces scope browser.tabs.query({}) to the ACTIVE workspace: tabs in other
+// workspaces are absent from the WebExtension API, not hidden-but-listed. A pageIdx is a
+// POSITION in that visible list, so a workspace switch silently re-points every index at a
+// different tab. tabId addresses a tab by identity and fails loudly instead.
+const WORKSPACE_NOTE =
+  "Zen Workspaces scope the WebExtension tab list to the ACTIVE workspace - tabs in other workspaces are absent from the API, not merely hidden.";
+
+const PAGE_IDX_DESC =
+  "Position in the list_pages output. Convenience only: positions shift whenever a tab opens or closes, and a Zen workspace switch re-points every index at a different tab. Prefer tabId.";
+const TAB_ID_DESC =
+  "Durable tab handle from list_pages (tabId=NNN). Survives reordering and errors if the tab is not in the active Zen workspace, instead of silently hitting another tab. Preferred over pageIdx; pass exactly one of the two.";
+const EXPECT_TAB_SET_DESC =
+  "Optional guard: the tabSet fingerprint printed in the list_pages header. If the visible tab set changed since then, the call fails without acting.";
+
+function targetShape() {
+  return {
+    pageIdx: z.number().int().nonnegative().optional().describe(PAGE_IDX_DESC),
+    tabId: z.number().int().optional().describe(TAB_ID_DESC),
+    expectTabSet: z.string().optional().describe(EXPECT_TAB_SET_DESC),
+  };
+}
+
+export interface PageTarget {
+  pageIdx?: number;
+  tabId?: number;
+  expectTabSet?: string;
+}
+
+export function tabSetFingerprint(pages: PageInfo[]): string {
+  const material = sortedPages(pages)
+    .map((p) => `${p.windowId}:${p.index}:${p.tabId}`)
+    .join(",");
+  return createHash("sha256").update(material).digest("hex").slice(0, 8);
+}
+
+function visibleSetSuffix(pages: PageInfo[]): string {
+  return `${pages.length} tab${pages.length === 1 ? "" : "s"} are currently visible (tabSet=${tabSetFingerprint(pages)}); run list_pages to re-resolve.`;
+}
+
+function pageByTabId(pages: PageInfo[], tabId: number): PageInfo {
+  const page = pages.find((p) => p.tabId === tabId);
+  if (page) return page;
+  throw new ZenToolError(
+    "NOT_FOUND",
+    `tabId ${tabId} not found in the active workspace - it may be in another Zen workspace. Switch workspaces or re-resolve by URL.`,
+    `Nothing was done. ${WORKSPACE_NOTE} ${visibleSetSuffix(pages)}`,
+  );
+}
+
+function pageByIdx(pages: PageInfo[], pageIdx: number): PageInfo {
   const page = pages[pageIdx];
-  if (!page) {
-    throw new Error(`pageIdx ${pageIdx} out of range; ${pages.length} pages currently open`);
+  if (page) return page;
+  throw new ZenToolError(
+    "NOT_FOUND",
+    `pageIdx ${pageIdx} out of range; ${pages.length} pages currently visible`,
+    `pageIdx is a position in the visible tab list, not a tab identity - it shifts when tabs open or close and when the Zen workspace changes. Prefer tabId. ${visibleSetSuffix(pages)}`,
+  );
+}
+
+async function resolveTarget(daemon: DaemonClient, target: PageTarget): Promise<PageInfo> {
+  const hasIdx = typeof target.pageIdx === "number";
+  const hasTabId = typeof target.tabId === "number";
+  if (hasIdx && hasTabId) {
+    throw new ZenToolError(
+      "BAD_INPUT",
+      "provide exactly one of pageIdx or tabId, not both",
+      "tabId addresses a tab by identity; pageIdx is positional. They can disagree.",
+    );
   }
-  return page;
+  if (!hasIdx && !hasTabId) {
+    throw new ZenToolError(
+      "BAD_INPUT",
+      "provide one of pageIdx or tabId",
+      "Both come from list_pages. tabId is the durable handle and is preferred.",
+    );
+  }
+  const pages = await listPages(daemon);
+  if (typeof target.expectTabSet === "string" && target.expectTabSet.length > 0) {
+    const actual = tabSetFingerprint(pages);
+    if (actual !== target.expectTabSet) {
+      throw new ZenToolError(
+        "STALE",
+        `tab set changed: expected tabSet=${target.expectTabSet}, visible set is tabSet=${actual}`,
+        `Nothing was done. A tab opened or closed, or the Zen workspace switched. ${WORKSPACE_NOTE} Re-run list_pages and retry.`,
+      );
+    }
+  }
+  return hasTabId
+    ? pageByTabId(pages, target.tabId as number)
+    : pageByIdx(pages, target.pageIdx as number);
 }
 
 function formatSnapshotTree(node: SnapshotNode | null, indent = 0): string {
@@ -146,15 +230,15 @@ function sortedPages(pages: PageInfo[]): PageInfo[] {
 }
 
 function formatPageList(pages: PageInfo[]): string {
-  if (pages.length === 0) return "(no pages)";
-  return pages
-    .map((p, i) => {
-      const marker = p.active ? "*" : " ";
-      const container = p.containerName ?? "no container";
-      const title = p.title ? ` "${p.title}"` : "";
-      return `${marker} [${i}] tabId=${p.tabId} ${p.url}${title} (${container})`;
-    })
-    .join("\n");
+  const header = `${pages.length} tab${pages.length === 1 ? "" : "s"} visible in the active Zen workspace · tabSet=${tabSetFingerprint(pages)}\nAddress tabs by tabId (durable); [n] is a position in this listing and shifts when tabs open, close, or the workspace changes.`;
+  if (pages.length === 0) return `${header}\n(no pages)`;
+  const lines = pages.map((p, i) => {
+    const marker = p.active ? "*" : " ";
+    const container = p.containerName ?? "no container";
+    const title = p.title ? ` "${p.title}"` : "";
+    return `${marker} [${i}] tabId=${p.tabId} ${p.url}${title} (${container})`;
+  });
+  return `${header}\n${lines.join("\n")}`;
 }
 
 async function listPages(daemon: DaemonClient): Promise<PageInfo[]> {
@@ -290,7 +374,7 @@ export function registerTools(
     {
       title: "List pages",
       description:
-        "List all open tabs across all windows. Pages are stably indexed by (windowId, tab.index); use that index with select_page / navigate_page / close_page / navigate_history.",
+        "List the open tabs the browser exposes, ordered by (windowId, tab.index). Every line carries tabId=NNN - that is the durable handle to pass to other tools; the bracketed [n] is only a position in this listing. Zen Workspaces scope this list to the ACTIVE workspace: tabs in other workspaces are absent from the API entirely, so a workspace switch changes both the membership and the numbering. The header's tabSet fingerprint identifies the visible set and can be passed back as expectTabSet to make a later call fail rather than act on a re-pointed index.",
       inputSchema: {},
     },
     async () => {
@@ -368,21 +452,15 @@ export function registerTools(
     {
       title: "Navigate page",
       description:
-        "Navigate the tab at pageIdx to URL. pageIdx comes from list_pages.",
+        "Navigate one tab to URL. Address it by tabId (durable) or pageIdx (positional); both come from list_pages.",
       inputSchema: {
-        pageIdx: z.number().int().nonnegative().describe("Index from list_pages"),
+        ...targetShape(),
         url: z.string().describe("Target URL"),
       },
     },
-    async ({ pageIdx, url }) => {
+    async ({ pageIdx, tabId, expectTabSet, url }) => {
       try {
-        const pages = await listPages(daemon);
-        const page = pages[pageIdx];
-        if (!page) {
-          throw new Error(
-            `pageIdx ${pageIdx} out of range; ${pages.length} pages currently open`,
-          );
-        }
+        const page = await resolveTarget(daemon, { pageIdx, tabId, expectTabSet });
         await daemon.call(Methods.PagesNavigate, { tabId: page.tabId, url });
         return withNavMeta(ok(`tabId=${page.tabId} -> ${url}`), { url, navigated: true });
       } catch (err) {
@@ -396,28 +474,29 @@ export function registerTools(
     {
       title: "Select page",
       description:
-        "Focus a tab. Provide one of: pageIdx (from list_pages), url (substring match), title (substring match). Errors if multiple match for url/title.",
+        "Focus a tab. Provide exactly one of: tabId (durable handle from list_pages), pageIdx (positional), url (substring match), title (substring match). Errors if multiple match for url/title. Matching by url is the way back to a tab whose tabId is no longer visible after a Zen workspace switch.",
       inputSchema: {
-        pageIdx: z.number().int().nonnegative().optional(),
+        pageIdx: z.number().int().nonnegative().optional().describe(PAGE_IDX_DESC),
+        tabId: z.number().int().optional().describe(TAB_ID_DESC),
         url: z.string().optional(),
         title: z.string().optional(),
       },
     },
-    async ({ pageIdx, url, title }) => {
+    async ({ pageIdx, tabId, url, title }) => {
       try {
+        if ((typeof pageIdx === "number" ? 1 : 0) + (typeof tabId === "number" ? 1 : 0) > 1) {
+          throw new ZenToolError("BAD_INPUT", "provide exactly one of pageIdx or tabId, not both");
+        }
         const pages = await listPages(daemon);
         const target = ((): PageInfo => {
-          if (typeof pageIdx === "number") {
-            const p = pages[pageIdx];
-            if (!p) throw new Error(`pageIdx ${pageIdx} out of range`);
-            return p;
-          }
+          if (typeof tabId === "number") return pageByTabId(pages, tabId);
+          if (typeof pageIdx === "number") return pageByIdx(pages, pageIdx);
           if (url) {
             const matches = pages.filter((p) => p.url.includes(url));
             if (matches.length === 0) throw new Error(`no page matches url substring "${url}"`);
             if (matches.length > 1) {
               throw new Error(
-                `${matches.length} pages match url "${url}"; refine the substring or use pageIdx`,
+                `${matches.length} pages match url "${url}"; refine the substring or use tabId`,
               );
             }
             return matches[0]!;
@@ -427,12 +506,12 @@ export function registerTools(
             if (matches.length === 0) throw new Error(`no page matches title substring "${title}"`);
             if (matches.length > 1) {
               throw new Error(
-                `${matches.length} pages match title "${title}"; refine or use pageIdx`,
+                `${matches.length} pages match title "${title}"; refine or use tabId`,
               );
             }
             return matches[0]!;
           }
-          throw new Error("provide one of: pageIdx, url, title");
+          throw new ZenToolError("BAD_INPUT", "provide one of: tabId, pageIdx, url, title");
         })();
         await daemon.call(Methods.PagesSelect, { tabId: target.tabId });
         return withNavMeta(ok(`selected tabId=${target.tabId} ${target.url}`), { url: target.url });
@@ -446,16 +525,15 @@ export function registerTools(
     "close_page",
     {
       title: "Close page",
-      description: "Close the tab at pageIdx. pageIdx comes from list_pages.",
+      description:
+        "Close one tab. Address it by tabId (durable) or pageIdx (positional); both come from list_pages.",
       inputSchema: {
-        pageIdx: z.number().int().nonnegative().describe("Index from list_pages"),
+        ...targetShape(),
       },
     },
-    async ({ pageIdx }) => {
+    async ({ pageIdx, tabId, expectTabSet }) => {
       try {
-        const pages = await listPages(daemon);
-        const page = pages[pageIdx];
-        if (!page) throw new Error(`pageIdx ${pageIdx} out of range`);
+        const page = await resolveTarget(daemon, { pageIdx, tabId, expectTabSet });
         await daemon.call(Methods.PagesClose, { tabId: page.tabId });
         return ok(`closed tabId=${page.tabId} ${page.url}`);
       } catch (err) {
@@ -468,17 +546,16 @@ export function registerTools(
     "navigate_history",
     {
       title: "Navigate history",
-      description: "Go back or forward in the tab at pageIdx.",
+      description:
+        "Go back or forward in one tab. Address it by tabId (durable) or pageIdx (positional).",
       inputSchema: {
-        pageIdx: z.number().int().nonnegative().describe("Index from list_pages"),
+        ...targetShape(),
         direction: z.enum(["back", "forward"]),
       },
     },
-    async ({ pageIdx, direction }) => {
+    async ({ pageIdx, tabId, expectTabSet, direction }) => {
       try {
-        const pages = await listPages(daemon);
-        const page = pages[pageIdx];
-        if (!page) throw new Error(`pageIdx ${pageIdx} out of range`);
+        const page = await resolveTarget(daemon, { pageIdx, tabId, expectTabSet });
         const dir: NavigateHistoryDirection = direction;
         await daemon.call(Methods.PagesNavigateHistory, {
           tabId: page.tabId,
@@ -501,9 +578,9 @@ export function registerTools(
     {
       title: "Take DOM snapshot",
       description:
-        "Capture a structured DOM snapshot of the page at pageIdx. Returns a tree with stable UIDs that other DOM tools accept. UIDs are scoped to (tabId, snapshotId) and persist until the next take_snapshot, navigation, or clear_snapshot.",
+        "Capture a structured DOM snapshot of one tab (address it by tabId or pageIdx). Returns a tree with stable UIDs that other DOM tools accept. UIDs are scoped to (tabId, snapshotId) and persist until the next take_snapshot, navigation, or clear_snapshot.",
       inputSchema: {
-        pageIdx: z.number().int().nonnegative(),
+        ...targetShape(),
         selector: z.string().optional().describe("Optional CSS selector to scope the snapshot root"),
         includeAll: z
           .boolean()
@@ -514,13 +591,13 @@ export function registerTools(
         cursor: z.string().optional(),
       },
     },
-    async ({ pageIdx, selector, includeAll, includeIframes, maxBytes, cursor }) => {
+    async ({ pageIdx, tabId, expectTabSet, selector, includeAll, includeIframes, maxBytes, cursor }) => {
       try {
         if (cursor) {
           const next = continueCursor(cursor, maxBytes);
           return ok(next.text);
         }
-        const page = await resolvePageIdx(daemon, pageIdx);
+        const page = await resolveTarget(daemon, { pageIdx, tabId, expectTabSet });
         const params: Record<string, unknown> = { tabId: page.tabId };
         if (selector !== undefined) params.selector = selector;
         if (includeAll !== undefined) params.includeAll = includeAll;
@@ -543,12 +620,12 @@ export function registerTools(
     "clear_snapshot",
     {
       title: "Clear DOM snapshot",
-      description: "Drop the cached snapshot for the page at pageIdx.",
-      inputSchema: { pageIdx: z.number().int().nonnegative() },
+      description: "Drop the cached snapshot for one tab.",
+      inputSchema: { ...targetShape() },
     },
-    async ({ pageIdx }) => {
+    async ({ pageIdx, tabId, expectTabSet }) => {
       try {
-        const page = await resolvePageIdx(daemon, pageIdx);
+        const page = await resolveTarget(daemon, { pageIdx, tabId, expectTabSet });
         await daemon.call(Methods.DomClearSnapshot, { tabId: page.tabId });
         return ok(`cleared snapshot for tabId=${page.tabId}`);
       } catch (err) {
@@ -563,13 +640,13 @@ export function registerTools(
       title: "Click by UID",
       description: "Click the element with the given UID from the most recent snapshot of the page.",
       inputSchema: {
-        pageIdx: z.number().int().nonnegative(),
+        ...targetShape(),
         uid: z.string().describe("UID from take_snapshot"),
       },
     },
-    async ({ pageIdx, uid }) => {
+    async ({ pageIdx, tabId, expectTabSet, uid }) => {
       try {
-        const page = await resolvePageIdx(daemon, pageIdx);
+        const page = await resolveTarget(daemon, { pageIdx, tabId, expectTabSet });
         const r = await daemon.call<InteractionResult>(Methods.DomClick, {
           tabId: page.tabId,
           uid,
@@ -587,13 +664,13 @@ export function registerTools(
       title: "Hover by UID",
       description: "Dispatch mouseover + mouseenter on the element at UID.",
       inputSchema: {
-        pageIdx: z.number().int().nonnegative(),
+        ...targetShape(),
         uid: z.string(),
       },
     },
-    async ({ pageIdx, uid }) => {
+    async ({ pageIdx, tabId, expectTabSet, uid }) => {
       try {
-        const page = await resolvePageIdx(daemon, pageIdx);
+        const page = await resolveTarget(daemon, { pageIdx, tabId, expectTabSet });
         const r = await daemon.call<InteractionResult>(Methods.DomHover, {
           tabId: page.tabId,
           uid,
@@ -612,14 +689,14 @@ export function registerTools(
       description:
         "Set the value on an input/textarea/contenteditable element identified by UID. Dispatches input + change events.",
       inputSchema: {
-        pageIdx: z.number().int().nonnegative(),
+        ...targetShape(),
         uid: z.string(),
         value: z.string(),
       },
     },
-    async ({ pageIdx, uid, value }) => {
+    async ({ pageIdx, tabId, expectTabSet, uid, value }) => {
       try {
-        const page = await resolvePageIdx(daemon, pageIdx);
+        const page = await resolveTarget(daemon, { pageIdx, tabId, expectTabSet });
         const r = await daemon.call<InteractionResult>(Methods.DomFill, {
           tabId: page.tabId,
           uid,
@@ -639,13 +716,13 @@ export function registerTools(
       description:
         "Fill multiple form fields in one call. Each field is { uid, value }. All fields must resolve from the current snapshot or the call errors.",
       inputSchema: {
-        pageIdx: z.number().int().nonnegative(),
+        ...targetShape(),
         fields: z.array(z.object({ uid: z.string(), value: z.string() })),
       },
     },
-    async ({ pageIdx, fields }) => {
+    async ({ pageIdx, tabId, expectTabSet, fields }) => {
       try {
-        const page = await resolvePageIdx(daemon, pageIdx);
+        const page = await resolveTarget(daemon, { pageIdx, tabId, expectTabSet });
         const r = await daemon.call<InteractionResult>(Methods.DomFillForm, {
           tabId: page.tabId,
           fields,
@@ -664,14 +741,14 @@ export function registerTools(
       description:
         "Synthetic drag from one element to another. Dispatches dragstart, dragenter, dragover, drop, dragend with a shared DataTransfer.",
       inputSchema: {
-        pageIdx: z.number().int().nonnegative(),
+        ...targetShape(),
         fromUid: z.string(),
         toUid: z.string(),
       },
     },
-    async ({ pageIdx, fromUid, toUid }) => {
+    async ({ pageIdx, tabId, expectTabSet, fromUid, toUid }) => {
       try {
-        const page = await resolvePageIdx(daemon, pageIdx);
+        const page = await resolveTarget(daemon, { pageIdx, tabId, expectTabSet });
         const r = await daemon.call<InteractionResult>(Methods.DomDrag, {
           tabId: page.tabId,
           fromUid,
@@ -690,13 +767,13 @@ export function registerTools(
       title: "Resolve UID to selector",
       description: "Look up the CSS selector for a UID from the current snapshot.",
       inputSchema: {
-        pageIdx: z.number().int().nonnegative(),
+        ...targetShape(),
         uid: z.string(),
       },
     },
-    async ({ pageIdx, uid }) => {
+    async ({ pageIdx, tabId, expectTabSet, uid }) => {
       try {
-        const page = await resolvePageIdx(daemon, pageIdx);
+        const page = await resolveTarget(daemon, { pageIdx, tabId, expectTabSet });
         const r = await daemon.call<ResolveUidResult>(Methods.DomResolveUidToSelector, {
           tabId: page.tabId,
           uid,
@@ -716,19 +793,19 @@ export function registerTools(
       description:
         "Run JavaScript in the page's MAIN world. The provided string is the function body; return a JSON-serializable value with `return ...`. Cannot return DOM nodes or non-serializable objects.",
       inputSchema: {
-        pageIdx: z.number().int().nonnegative(),
+        ...targetShape(),
         code: z.string().describe("Function body. Use `return` to send a value back."),
         maxBytes: z.number().int().positive().optional(),
         cursor: z.string().optional(),
       },
     },
-    async ({ pageIdx, code, maxBytes, cursor }) => {
+    async ({ pageIdx, tabId, expectTabSet, code, maxBytes, cursor }) => {
       try {
         if (cursor) {
           const next = continueCursor(cursor, maxBytes);
           return ok(next.text);
         }
-        const page = await resolvePageIdx(daemon, pageIdx);
+        const page = await resolveTarget(daemon, { pageIdx, tabId, expectTabSet });
         const r = await daemon.call<EvaluateScriptResult>(Methods.DomEvaluate, {
           tabId: page.tabId,
           code,
@@ -751,16 +828,16 @@ export function registerTools(
     {
       title: "Screenshot page",
       description:
-        "Capture the visible viewport of the tab at pageIdx. Defaults to JPEG quality 80; pass format=png for lossless output. Captures the tab in place without activating it or changing window focus.",
+        "Capture the visible viewport of one tab (address it by tabId or pageIdx). Defaults to JPEG quality 80; pass format=png for lossless output. Captures the tab in place without activating it or changing window focus.",
       inputSchema: {
-        pageIdx: z.number().int().nonnegative(),
+        ...targetShape(),
         format: z.enum(["jpeg", "png"]).optional(),
         quality: z.number().int().min(0).max(100).optional(),
       },
     },
-    async ({ pageIdx, format, quality }) => {
+    async ({ pageIdx, tabId, expectTabSet, format, quality }) => {
       try {
-        const page = await resolvePageIdx(daemon, pageIdx);
+        const page = await resolveTarget(daemon, { pageIdx, tabId, expectTabSet });
         const params: { tabId: number; format?: "jpeg" | "png"; quality?: number } = {
           tabId: page.tabId,
         };
@@ -789,19 +866,19 @@ export function registerTools(
       description:
         "Return the visible innerText of the page or a selector subtree. Cheaper than take_snapshot for reading content. Honors a response budget; pass cursor to continue.",
       inputSchema: {
-        pageIdx: z.number().int().nonnegative(),
+        ...targetShape(),
         selector: z.string().optional(),
         maxBytes: z.number().int().positive().optional(),
         cursor: z.string().optional(),
       },
     },
-    async ({ pageIdx, selector, maxBytes, cursor }) => {
+    async ({ pageIdx, tabId, expectTabSet, selector, maxBytes, cursor }) => {
       try {
         if (cursor) {
           const next = continueCursor(cursor, maxBytes);
           return ok(next.text);
         }
-        const page = await resolvePageIdx(daemon, pageIdx);
+        const page = await resolveTarget(daemon, { pageIdx, tabId, expectTabSet });
         const params: { tabId: number; selector?: string } = { tabId: page.tabId };
         if (selector) params.selector = selector;
         const r = await daemon.call<GetPageTextResult>(Methods.DomGetPageText, params);
@@ -819,19 +896,19 @@ export function registerTools(
       description:
         "Extract the main article from the current page using Mozilla Readability and convert it to Markdown via Turndown. Strips nav, ads, sidebars. Honors a response budget.",
       inputSchema: {
-        pageIdx: z.number().int().nonnegative(),
+        ...targetShape(),
         maxBytes: z.number().int().positive().optional(),
         cursor: z.string().optional(),
         includeMetadata: z.boolean().optional(),
       },
     },
-    async ({ pageIdx, maxBytes, cursor, includeMetadata }) => {
+    async ({ pageIdx, tabId, expectTabSet, maxBytes, cursor, includeMetadata }) => {
       try {
         if (cursor) {
           const next = continueCursor(cursor, maxBytes);
           return ok(next.text);
         }
-        const page = await resolvePageIdx(daemon, pageIdx);
+        const page = await resolveTarget(daemon, { pageIdx, tabId, expectTabSet });
         const r = await daemon.call<ReadPageResult>(Methods.DomReadPage, {
           tabId: page.tabId,
         });
@@ -879,7 +956,7 @@ export function registerTools(
       description:
         "Take a snapshot (forced includeAll) and return matches whose text/name/value contain the given string. Returned UIDs are usable with click_by_uid / fill_by_uid.",
       inputSchema: {
-        pageIdx: z.number().int().nonnegative(),
+        ...targetShape(),
         text: z.string(),
         exact: z.boolean().optional(),
         caseSensitive: z.boolean().optional(),
@@ -887,12 +964,12 @@ export function registerTools(
         selector: z.string().optional(),
       },
     },
-    async ({ pageIdx, text, exact, caseSensitive, limit, selector }) => {
+    async ({ pageIdx, tabId, expectTabSet, text, exact, caseSensitive, limit, selector }) => {
       try {
         if (typeof text !== "string" || text.length === 0) {
           throw new ZenToolError("BAD_INPUT", "text must be a non-empty string");
         }
-        const page = await resolvePageIdx(daemon, pageIdx);
+        const page = await resolveTarget(daemon, { pageIdx, tabId, expectTabSet });
         const params: { tabId: number; selector?: string; includeAll: boolean } = {
           tabId: page.tabId,
           includeAll: true,
@@ -968,7 +1045,7 @@ export function registerTools(
       description:
         "Poll until a condition holds. Supports text (page innerText contains), selector_visible/hidden (locator matches and offsetParent), selector_count (locator count compared via op), url (substring or regex when urlRegex:true), time (fixed delay).",
       inputSchema: {
-        pageIdx: z.number().int().nonnegative(),
+        ...targetShape(),
         condition: z.enum([
           "text",
           "selector_visible",
@@ -990,6 +1067,8 @@ export function registerTools(
     async (args) => {
       const {
         pageIdx,
+        tabId,
+        expectTabSet,
         condition,
         text,
         selector,
@@ -1006,8 +1085,8 @@ export function registerTools(
           await new Promise((r) => setTimeout(r, delay));
           return ok(`Waited ${delay}ms.`);
         }
-        const page = await resolvePageIdx(daemon, pageIdx);
-        const tabId = page.tabId;
+        const page = await resolveTarget(daemon, { pageIdx, tabId, expectTabSet });
+        const targetTabId = page.tabId;
         const totalTimeout = timeout ?? 10_000;
         const start = Date.now();
         const deadline = start + totalTimeout;
@@ -1056,14 +1135,17 @@ export function registerTools(
           if (condition === "text") {
             const probe = `var t = document.body && document.body.innerText; return typeof t === 'string' && t.indexOf(${JSON.stringify(text)}) !== -1;`;
             const r = await daemon.call<EvaluateScriptResult>(Methods.DomEvaluate, {
-              tabId,
+              tabId: targetTabId,
               code: probe,
             });
             matched = r.result === true;
             lastObserved = matched ? "present" : "absent";
           } else if (condition === "url") {
             const tabs = await daemon.call<PagesListResult>(Methods.PagesList);
-            const tab = tabs.pages.find((p) => p.tabId === tabId);
+            const tab = tabs.pages.find((p) => p.tabId === targetTabId);
+            // The tab going missing mid-wait means it left the visible set (workspace
+            // switch or close). Say so instead of polling a vanished tab until timeout.
+            if (!tab) pageByTabId(sortedPages(tabs.pages), targetTabId);
             const url = tab?.url ?? "";
             matched = re ? re.test(url) : url.includes(urlPattern as string);
             lastObserved = `url=${url.slice(0, 80)}`;
@@ -1074,7 +1156,7 @@ export function registerTools(
                 ? `var sel = ${JSON.stringify(loc.selector)}; var els = Array.from(document.querySelectorAll(sel)); return els.map(function(el){ return el.offsetParent !== null || (el.getClientRects && el.getClientRects().length > 0); });`
                 : `var x = document.evaluate(${JSON.stringify(loc.expression)}, document, null, XPathResult.ORDERED_NODE_SNAPSHOT_TYPE, null); var out=[]; for (var i=0;i<x.snapshotLength;i++){ var el=x.snapshotItem(i); out.push(el.offsetParent !== null || (el.getClientRects && el.getClientRects().length > 0)); } return out;`;
             const r = await daemon.call<EvaluateScriptResult>(Methods.DomEvaluate, {
-              tabId,
+              tabId: targetTabId,
               code: probeCode,
             });
             const states = Array.isArray(r.result) ? (r.result as boolean[]) : [];
@@ -1134,14 +1216,14 @@ export function registerTools(
       description:
         'Click the first element matching the locator. Locator grammar: prefixes css:/xpath:/text:/text*:/role: (default is css). Example: "text:Submit" or "role:button[name=\\"Submit\\"]".',
       inputSchema: {
-        pageIdx: z.number().int().nonnegative(),
+        ...targetShape(),
         selector: z.string(),
         timeoutMs: z.number().int().positive().optional(),
       },
     },
-    async ({ pageIdx, selector, timeoutMs }) => {
+    async ({ pageIdx, tabId, expectTabSet, selector, timeoutMs }) => {
       try {
-        const page = await resolvePageIdx(daemon, pageIdx);
+        const page = await resolveTarget(daemon, { pageIdx, tabId, expectTabSet });
         const locator = toLocator(selector);
         const r = await daemon.call<InteractionResult>(Methods.DomClickByLocator, {
           tabId: page.tabId,
@@ -1161,14 +1243,14 @@ export function registerTools(
       title: "Hover by locator",
       description: "Dispatch mouseover/mouseenter on the first element matching the locator.",
       inputSchema: {
-        pageIdx: z.number().int().nonnegative(),
+        ...targetShape(),
         selector: z.string(),
         timeoutMs: z.number().int().positive().optional(),
       },
     },
-    async ({ pageIdx, selector, timeoutMs }) => {
+    async ({ pageIdx, tabId, expectTabSet, selector, timeoutMs }) => {
       try {
-        const page = await resolvePageIdx(daemon, pageIdx);
+        const page = await resolveTarget(daemon, { pageIdx, tabId, expectTabSet });
         const locator = toLocator(selector);
         const r = await daemon.call<InteractionResult>(Methods.DomHoverByLocator, {
           tabId: page.tabId,
@@ -1189,15 +1271,15 @@ export function registerTools(
       description:
         "Set the value of an input/textarea/contenteditable matched by the locator. Dispatches input + change.",
       inputSchema: {
-        pageIdx: z.number().int().nonnegative(),
+        ...targetShape(),
         selector: z.string(),
         value: z.string(),
         timeoutMs: z.number().int().positive().optional(),
       },
     },
-    async ({ pageIdx, selector, value, timeoutMs }) => {
+    async ({ pageIdx, tabId, expectTabSet, selector, value, timeoutMs }) => {
       try {
-        const page = await resolvePageIdx(daemon, pageIdx);
+        const page = await resolveTarget(daemon, { pageIdx, tabId, expectTabSet });
         const locator = toLocator(selector);
         const r = await daemon.call<InteractionResult>(Methods.DomFillByLocator, {
           tabId: page.tabId,
@@ -1219,7 +1301,7 @@ export function registerTools(
       description:
         "Type text into the matched element one keypress at a time, dispatching keydown/keypress/input/keyup. Use fill for plain value-set.",
       inputSchema: {
-        pageIdx: z.number().int().nonnegative(),
+        ...targetShape(),
         selector: z.string(),
         text: z.string(),
         delayMs: z.number().int().nonnegative().optional(),
@@ -1227,9 +1309,9 @@ export function registerTools(
         timeoutMs: z.number().int().positive().optional(),
       },
     },
-    async ({ pageIdx, selector, text, delayMs, clearFirst, timeoutMs }) => {
+    async ({ pageIdx, tabId, expectTabSet, selector, text, delayMs, clearFirst, timeoutMs }) => {
       try {
-        const page = await resolvePageIdx(daemon, pageIdx);
+        const page = await resolveTarget(daemon, { pageIdx, tabId, expectTabSet });
         const locator = toLocator(selector);
         const r = await daemon.call<InteractionResult>(Methods.DomTypeByLocator, {
           tabId: page.tabId,
@@ -1253,15 +1335,15 @@ export function registerTools(
       description:
         "Drag the from element onto the to element. Dispatches synthetic DragEvents (dragstart, dragenter, dragover, drop, dragend).",
       inputSchema: {
-        pageIdx: z.number().int().nonnegative(),
+        ...targetShape(),
         from: z.string(),
         to: z.string(),
         timeoutMs: z.number().int().positive().optional(),
       },
     },
-    async ({ pageIdx, from, to, timeoutMs }) => {
+    async ({ pageIdx, tabId, expectTabSet, from, to, timeoutMs }) => {
       try {
-        const page = await resolvePageIdx(daemon, pageIdx);
+        const page = await resolveTarget(daemon, { pageIdx, tabId, expectTabSet });
         const r = await daemon.call<InteractionResult>(Methods.DomDragByLocator, {
           tabId: page.tabId,
           from: toLocator(from),
@@ -1282,16 +1364,16 @@ export function registerTools(
       description:
         "Pick an option from a <select> element identified by locator. Choose by value, label (visible text), or index.",
       inputSchema: {
-        pageIdx: z.number().int().nonnegative(),
+        ...targetShape(),
         selector: z.string(),
         by: z.enum(["value", "label", "index"]),
         value: z.string(),
         timeoutMs: z.number().int().positive().optional(),
       },
     },
-    async ({ pageIdx, selector, by, value, timeoutMs }) => {
+    async ({ pageIdx, tabId, expectTabSet, selector, by, value, timeoutMs }) => {
       try {
-        const page = await resolvePageIdx(daemon, pageIdx);
+        const page = await resolveTarget(daemon, { pageIdx, tabId, expectTabSet });
         const locator = toLocator(selector);
         const r = await daemon.call<SelectOptionResult>(Methods.DomSelectOptionByLocator, {
           tabId: page.tabId,
@@ -1332,15 +1414,15 @@ export function registerTools(
       description:
         'Send a key combo (e.g. "Enter", "Cmd+L", "Ctrl+Shift+P", "Escape"). Without selector, sends to the active element.',
       inputSchema: {
-        pageIdx: z.number().int().nonnegative(),
+        ...targetShape(),
         keys: z.string(),
         selector: z.string().optional(),
         timeoutMs: z.number().int().positive().optional(),
       },
     },
-    async ({ pageIdx, keys, selector, timeoutMs }) => {
+    async ({ pageIdx, tabId, expectTabSet, keys, selector, timeoutMs }) => {
       try {
-        const page = await resolvePageIdx(daemon, pageIdx);
+        const page = await resolveTarget(daemon, { pageIdx, tabId, expectTabSet });
         const target = selector
           ? { kind: "locator" as const, locator: toLocator(selector) }
           : { kind: "active" as const };
@@ -1364,7 +1446,7 @@ export function registerTools(
       description:
         "Scroll a page by pixels, by pages, or to a locator/UID. Returns the new scroll position and edge flags.",
       inputSchema: {
-        pageIdx: z.number().int().nonnegative(),
+        ...targetShape(),
         x: z.number().optional().describe("Horizontal pixel delta."),
         y: z.number().optional().describe("Vertical pixel delta."),
         pages: z.number().optional().describe("Vertical page delta, where 1 is one viewport."),
@@ -1373,9 +1455,9 @@ export function registerTools(
         timeoutMs: z.number().int().positive().optional(),
       },
     },
-    async ({ pageIdx, x, y, pages, selector, uid, timeoutMs }) => {
+    async ({ pageIdx, tabId, expectTabSet, x, y, pages, selector, uid, timeoutMs }) => {
       try {
-        const page = await resolvePageIdx(daemon, pageIdx);
+        const page = await resolveTarget(daemon, { pageIdx, tabId, expectTabSet });
         const params: {
           tabId: number;
           x?: number;
@@ -1508,20 +1590,20 @@ export function registerTools(
       title: "Get localStorage/sessionStorage",
       description: "Read storage items as a key->value map. Filter via keys array.",
       inputSchema: {
-        pageIdx: z.number().int().nonnegative(),
+        ...targetShape(),
         kind: z.enum(["local", "session"]),
         keys: z.array(z.string()).optional(),
         maxBytes: z.number().int().positive().optional(),
         cursor: z.string().optional(),
       },
     },
-    async ({ pageIdx, kind, keys, maxBytes, cursor }) => {
+    async ({ pageIdx, tabId, expectTabSet, kind, keys, maxBytes, cursor }) => {
       try {
         if (cursor) {
           const next = continueCursor(cursor, maxBytes);
           return ok(next.text);
         }
-        const page = await resolvePageIdx(daemon, pageIdx);
+        const page = await resolveTarget(daemon, { pageIdx, tabId, expectTabSet });
         const params: { tabId: number; kind: "local" | "session"; keys?: string[] } = {
           tabId: page.tabId,
           kind,
@@ -1541,14 +1623,14 @@ export function registerTools(
       title: "Set localStorage/sessionStorage",
       description: "Write key/value pairs into storage.",
       inputSchema: {
-        pageIdx: z.number().int().nonnegative(),
+        ...targetShape(),
         kind: z.enum(["local", "session"]),
         items: z.record(z.string()),
       },
     },
-    async ({ pageIdx, kind, items }) => {
+    async ({ pageIdx, tabId, expectTabSet, kind, items }) => {
       try {
-        const page = await resolvePageIdx(daemon, pageIdx);
+        const page = await resolveTarget(daemon, { pageIdx, tabId, expectTabSet });
         const r = await daemon.call<StorageSetResult>(Methods.StorageSet, {
           tabId: page.tabId,
           kind,
@@ -1568,14 +1650,14 @@ export function registerTools(
       description:
         "Remove specific keys, or omit keys to clear all. Empty keys array is a no-op rather than a wipe.",
       inputSchema: {
-        pageIdx: z.number().int().nonnegative(),
+        ...targetShape(),
         kind: z.enum(["local", "session"]),
         keys: z.array(z.string()).optional(),
       },
     },
-    async ({ pageIdx, kind, keys }) => {
+    async ({ pageIdx, tabId, expectTabSet, kind, keys }) => {
       try {
-        const page = await resolvePageIdx(daemon, pageIdx);
+        const page = await resolveTarget(daemon, { pageIdx, tabId, expectTabSet });
         if (keys !== undefined && (!Array.isArray(keys) || keys.length === 0)) {
           if (Array.isArray(keys) && keys.length === 0) {
             return ok("no keys to remove (empty key list)");
@@ -1601,12 +1683,18 @@ export function registerTools(
     {
       title: "Get Firefox info",
       description:
-        "Report identity + connection state: MCP server name/version, daemon URL, current container scope (if any), connected extension version, platform, tab/window/container counts.",
+        "Report identity + connection state: MCP server name/version, daemon URL, current container scope (if any), connected extension version, platform, tab/window/container counts. Tab counts cover only the ACTIVE Zen workspace - Zen exposes no workspace identifier to WebExtensions, so there is no workspace id to report; the tabs.fingerprint value is the available proxy. It changes on any tab open/close, so a change is not proof of a workspace switch - but a workspace switch always changes it.",
       inputSchema: {},
     },
     async () => {
       try {
         const r = await daemon.call<InfoGetResult>(Methods.InfoGet);
+        let fingerprint = "(unavailable)";
+        try {
+          fingerprint = tabSetFingerprint(await listPages(daemon));
+        } catch {
+          // Diagnostics should still report everything else if the tab list call fails.
+        }
         const lines = [
           `mcp.server: ${identity.name} ${identity.version}`,
           `mcp.daemonUrl: ${identity.daemonUrl}`,
@@ -1617,7 +1705,9 @@ export function registerTools(
           `extension.userAgent: ${r.userAgent}`,
           `protocolVersion: ${r.protocolVersion}`,
           `windows: ${r.windowCount}`,
-          `tabs: ${r.tabCount}`,
+          `tabs.visible: ${r.tabCount} (active Zen workspace only)`,
+          `tabs.fingerprint: ${fingerprint}`,
+          `tabs.workspaceId: (not exposed by Zen to WebExtensions)`,
           `containers: ${r.containerCount}`,
         ];
         return ok(lines.join("\n"));
@@ -1634,21 +1724,24 @@ export function registerTools(
       description: "Return historical navigation observations for a host. These are advisory data and must be verified against the live page.",
       inputSchema: {
         host: z.string().optional(),
-        pageIdx: z.number().int().nonnegative().optional(),
+        pageIdx: z.number().int().nonnegative().optional().describe(PAGE_IDX_DESC),
+        tabId: z.number().int().optional().describe(TAB_ID_DESC),
         query: z.string().max(300).optional(),
       },
     },
-    async ({ host, pageIdx, query }) => {
+    async ({ host, pageIdx, tabId, query }) => {
       try {
         let normalizedHost: string | null = host ? normalizeHost(host) : null;
         let path: string | undefined;
-        if (!normalizedHost && typeof pageIdx === "number") {
-          const page = await resolvePageIdx(daemon, pageIdx);
+        if (!normalizedHost && (typeof pageIdx === "number" || typeof tabId === "number")) {
+          const page = await resolveTarget(daemon, { pageIdx, tabId });
           const normalized = normalizeUrl(page.url);
           normalizedHost = normalized?.host ?? null;
           path = normalized?.path;
         }
-        if (!normalizedHost) throw new ZenToolError("BAD_INPUT", "provide a valid host or pageIdx");
+        if (!normalizedHost) {
+          throw new ZenToolError("BAD_INPUT", "provide a valid host, tabId, or pageIdx");
+        }
         const result = await daemon.call<NavMemoryQueryResult>(Methods.NavMemoryQuery, {
           host: normalizedHost,
           ...(path ? { path } : {}),

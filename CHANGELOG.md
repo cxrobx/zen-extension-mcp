@@ -4,6 +4,49 @@ All notable changes to this project will be documented here. Versions track the
 extension manifest and the AMO-signed XPI artifacts. Server, daemon, and shared
 package versions move together with the extension.
 
+## Unreleased (durable tab addressing — server only, no extension change)
+
+Fixes a latent retargeting bug. Zen Workspaces scope `browser.tabs.query({})` to the
+**active workspace**: tabs in other workspaces are absent from the WebExtension API
+entirely, not hidden-but-listed. Because every tool addressed tabs by `pageIdx` — a
+*position* in that visible list — switching workspaces mid-session silently re-pointed
+every index at a different tab. Nothing errored; the operation just landed somewhere else.
+Observed live as `get_firefox_info` reporting `tabs: 71` then `tabs: 25` over one
+uninterrupted extension connection, with a client's Search Console property among the
+newly-visible set.
+
+- **Every per-tab tool now accepts `tabId` as well as `pageIdx`** (exactly one, never
+  both). `tabId` resolves by identity against the visible set; if the tab is not there the
+  call fails with `NOT_FOUND` — *"tabId N not found in the active workspace — it may be in
+  another Zen workspace. Switch workspaces or re-resolve by URL."* — and no RPC is sent to
+  the browser. Recovery stays manual on purpose: silently reaching into another workspace
+  would be a variant of the same bug.
+- `pageIdx` keeps working unchanged for backward compatibility, but its `.describe()` text
+  and the out-of-range error now say it is positional and shifts on workspace switches.
+  `select_page` gained `tabId` alongside its existing `url` / `title` matching.
+- **`list_pages`** gained a header: visible tab count, a `tabSet=` fingerprint of the
+  visible `(windowId, index, tabId)` set, and a note that `[n]` is a position while
+  `tabId=` is the handle.
+- **`expectTabSet`** (optional, on every per-tab tool): pass the fingerprint from
+  `list_pages` and the call fails `STALE` without acting if the visible set changed.
+- **`get_firefox_info`** now reports `tabs.visible` (labeled active-workspace-only),
+  `tabs.fingerprint`, and `tabs.workspaceId: (not exposed by Zen to WebExtensions)` —
+  stated explicitly rather than inventing an identifier Zen does not expose.
+- `wait_for(condition=url)` errors if the tab leaves the visible set mid-wait instead of
+  polling a vanished tab until timeout.
+- Nav-memory attributes notes by `tabId` when given, so observations can't be filed
+  against whatever page now occupies a stale index.
+- **No extension change** — the wire protocol already carried `tabId` end to end;
+  `pageIdx` only ever existed in the MCP tool surface. No manifest bump, no re-signing.
+  Running Claude sessions hold the old `server/dist/index.js` in memory and must be
+  restarted to pick this up.
+- Verified: `node --test scripts/tab-target.test.mjs` (8 tests — drives the real MCP server
+  against a stub extension whose visible tab set is swapped mid-session, asserting the
+  tools error rather than act, and that no RPC reaches the browser); live
+  `scripts/probe-tabid.mjs` against real Zen (25 visible tabs); `scripts/probe-pages.mjs`
+  and `scripts/probe-dom.mjs` still pass on the `pageIdx` path; `scripts/smoke.mjs` and
+  `npm run test:nav-memory` unchanged.
+
 ## 0.0.13 (non-disruptive automation: background tabs + focus-free screenshots)
 
 - `new_page` / `new_page_in_container` now open tabs in the **background** by

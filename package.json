@@ -18,6 +18,7 @@
     "build:extension": "npm run build -w extension",
     "typecheck": "tsc -b shared daemon server extension",
     "test:nav-memory": "npm run build:shared && npm run build:daemon && npm run build:server && node --test scripts/nav-memory.test.mjs",
+    "test:tab-target": "npm run build:shared && npm run build:daemon && npm run build:server && node --test scripts/tab-target.test.mjs",
     "daemon": "node daemon/dist/index.js",
     "server": "node server/dist/index.js",
     "extension:run": "npm run run -w extension",

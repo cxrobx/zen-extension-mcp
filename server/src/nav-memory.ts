@@ -93,7 +93,13 @@ export class NavContext {
       const host = normalizeHost(args.domain.replace(/^\./, ""));
       if (host) candidates.push(`https://${host}/`);
     }
-    if (typeof args.pageIdx === "number") {
+    // tabId addresses a tab by identity, so it wins over the positional pageIdx: after a
+    // Zen workspace switch the same index can name an entirely different page, and notes
+    // must not be attributed to it.
+    if (typeof args.tabId === "number") {
+      const page = this.pages.find((item) => item.tabId === args.tabId);
+      if (page) candidates.push(page.url);
+    } else if (typeof args.pageIdx === "number") {
       const page = this.pages[args.pageIdx];
       if (page) candidates.push(page.url);
     }

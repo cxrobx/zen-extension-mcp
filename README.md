@@ -26,6 +26,8 @@ The two coexist. They run different daemons by default. The current surface is *
 
 ## Tool surface
 
+Per-tab tools take `tabId` (durable) or `pageIdx` (positional) — see [Addressing tabs](#addressing-tabs-tabid-vs-pageidx) below before using `pageIdx`.
+
 | Bucket | Tools |
 |---|---|
 | **Containers** | `list_containers`, `set_default_container`, `new_page_in_container` |
@@ -35,6 +37,20 @@ The two coexist. They run different daemons by default. The current surface is *
 | **Cookies/storage** | `get_cookies`, `set_cookies`, `clear_cookies`, `get_storage`, `set_storage`, `clear_storage` |
 | **Diagnostics** | `get_firefox_info` |
 | **Navigation memory** | `get_domain_playbook`, `nav_memory_stats`, `nav_memory_forget` |
+
+### Addressing tabs: `tabId` vs `pageIdx`
+
+Every per-tab tool accepts **either** `tabId` (durable) or `pageIdx` (positional) — exactly one, never both. Both come from `list_pages`, which prints `tabId=NNN` on each line and a `tabSet=` fingerprint in its header.
+
+**Prefer `tabId`.** `pageIdx` is a position in the currently visible tab list, so it is only valid for as long as that list is unchanged.
+
+> ⚠️ **Zen Workspaces caveat.** Zen scopes `browser.tabs.query({})` to the **active workspace**. Tabs in other workspaces are *absent from the WebExtension API entirely* — not hidden-but-listed. So switching workspaces mid-session re-points every `pageIdx` at a different tab, and no error is raised: the operation just lands somewhere else. With `tabId` the same switch produces a loud `NOT_FOUND` ("tabId N not found in the active workspace — it may be in another Zen workspace") and nothing is sent to the browser.
+>
+> Recovery is deliberate, not automatic: switch back to the workspace holding the tab, or re-resolve it with `select_page({ url: "substring" })`. Nothing silently reaches across workspaces, because reaching into the wrong workspace is the bug itself.
+
+Optional guard for `pageIdx` callers: pass `expectTabSet` with the fingerprint from the `list_pages` header. If the visible set changed at all (tab opened, closed, or workspace switched), the call fails with `STALE` **without acting**.
+
+`get_firefox_info` reports `tabs.visible` and `tabs.fingerprint` for the active workspace. It reports no workspace id because **Zen exposes none to WebExtensions** — the fingerprint is the only available signal, and while it always changes on a workspace switch, it also changes on any ordinary tab open/close.
 
 Dropped from `zen-mcp` because no WebExtension equivalent: `list_privileged_contexts` / `select_privileged_context` / `evaluate_privileged_script`, `set_firefox_prefs` / `get_firefox_prefs`, `restart_firefox`, `upload_file_by_uid`, `install_extension` / `list_extensions` / `uninstall_extension`.
 

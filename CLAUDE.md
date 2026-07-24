@@ -83,6 +83,8 @@ For installation specifically: `open -a "/Applications/Zen.app" <xpi>` triggers 
 | `scripts/probe-dom.mjs` | M3 read-side: snapshot, evaluate_script, resolve_uid, screenshot. Targets example.com. |
 | `scripts/probe-interact.mjs` | M3 write-side: click, hover, fill, fill_form, rich editor input, pointer sequence, auto-scroll, auto-wait against a self-served localhost fixture. |
 | `scripts/probe-info.mjs` | get_firefox_info with and without `--container` scope. |
+| `scripts/probe-tabid.mjs` | Durable tab addressing against live Zen: `tabId` round-trip, absent-tabId error, stale `expectTabSet`, mutual exclusion. Creates + closes its own tab. |
+| `scripts/tab-target.test.mjs` | `node --test` regression for the workspace retargeting bug — swaps the stub extension's visible tab set mid-session and asserts the tools error instead of acting. `npm run test:tab-target`. |
 | `scripts/probe-navmem.mjs` | Scratch-store M0–M4: seeds, host isolation, injection, redaction, ETL, embeddings, stats, and forget. No live browser required. |
 
 For nav-memory work run `npm run test:nav-memory`, `node scripts/probe-navmem.mjs`, and the unchanged `node scripts/smoke.mjs`. The default ETL probe uses a fake tool-free Claude executable and fake Ollama endpoint; a live subscription is not a test prerequisite.
@@ -91,6 +93,7 @@ After any extension change, run the relevant probe(s) — `npm run build` doesn'
 
 ## Footguns to remember
 
+- **Zen Workspaces scope `browser.tabs.query({})` to the ACTIVE workspace.** Tabs in other workspaces are *absent from the WebExtension API*, not hidden-but-listed — `pages.list` is already correct and global; the constraint is imposed above the API. Don't try to "fix" it with a better query. `pageIdx` is therefore a position that silently re-points at a different tab when the workspace changes; `tabId` (resolved in `resolveTarget`, `server/src/tools.ts`) is the durable handle and **must fail loudly** when the tab isn't visible. Never add a fallback that searches other workspaces or auto-reresolves by URL — silently reaching into another workspace is the same bug wearing a hat.
 - **CSP `upgrade-insecure-requests`** is in Firefox MV3's default extension CSP and silently rewrites `ws://127.0.0.1` to `wss://`. The daemon doesn't speak TLS so the connection hangs in CONNECTING. The manifest already overrides this (`content_security_policy.extension_pages` without that directive). **Don't remove that override.**
 - **`<all_urls>` is opt-in by user in MV3.** Declared in manifest ≠ granted at runtime. User must toggle "Access your data for all websites" in `about:addons`. `screenshot_page` (`tabs.captureVisibleTab`) needs this; `scripting.executeScript` works without.
 - **`captureVisibleTab(windowId, opts)`** rejects with "Missing activeTab permission" in Zen even with `<all_urls>`. The fix already shipped: activate the target tab first, then call `captureVisibleTab(opts)` with no windowId.
