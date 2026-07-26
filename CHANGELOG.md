@@ -4,6 +4,46 @@ All notable changes to this project will be documented here. Versions track the
 extension manifest and the AMO-signed XPI artifacts. Server, daemon, and shared
 package versions move together with the extension.
 
+## Unreleased (nav-memory consolidation — daemon/server only, no extension change)
+
+Nav memory captured and distilled reliably but never *consolidated*: after three days of
+real use, all 46 notes sat at `reinforced: 1` and zero merges had ever fired. The distiller
+couldn't see what it had already written, so every run re-invented the phrasing and missed
+both the exact-id and normalized-text dedupe paths; the embedding merge threshold (`0.9`)
+sat above the measured same-host similarity ceiling (0.888); and with `reinforced` pinned at
+1, the `1 + log2(reinforced)` ranking multiplier was a store-wide constant, so
+repeatedly-confirmed knowledge never outranked a one-off.
+
+- **Consolidation-aware distiller.** Each ETL run is shown the host's top 20 notes as a
+  numbered `KNOWN NOTES` list and can answer `"reinforces": <number>` instead of restating
+  a fact. References are positional integers, not ids — unmangleable, unspoofable, and only
+  `1..list.length` is honored. Redaction, prompt-like-text rejection, and the tool allowlist
+  still run before any merge decision, and the distiller sandbox is untouched.
+- **Hourly consolidation sweep** as the safety net for duplicates the distiller can't see
+  (other hosts, other sessions). Pairwise cosine within each host; merges at or above the
+  new shared `MERGE_SIMILARITY` (0.86). Keeps the higher-confidence note, sums `reinforced`,
+  unions `tools`, keeps the earliest `createdAt` and latest `lastSeenAt`. A seed can be a
+  merge target but never a deleted source. Every merge logs at `info` (host, kept, dropped,
+  score) so it's auditable and recoverable via `nav_memory_forget`. The first sweep after
+  upgrade is also the migration for the existing store — no separate script.
+- **Insert-path threshold lowered** from `0.9` to the same `MERGE_SIMILARITY` (0.86),
+  citing the measured distribution: real duplicates 0.864–0.888, distinct facts ≤ 0.843.
+- **Session durability.** Events lived only in daemon RAM until WS disconnect, so a
+  `kill -9` lost everything and an all-day session never flushed. Sessions now also
+  checkpoint when idle for 10 minutes or when they reach 400 events (instead of
+  shift-dropping at the 500 cap). Fragmented work files are harmless now that re-learned
+  facts reinforce.
+- **Consumed work is archived, not deleted.** `sessions/done/` keeps already-redacted work
+  files as a durable usage history (300 files / 30 days, pruned like the other queues);
+  `nav_memory_forget` with a host purges them too, and the count surfaces in stats.
+- **Telemetry.** Successful ETL now logs `created`/`merged` (previously only failures
+  logged). `nav_memory_stats` gained `done` and an `etl` block — `created`, `merged`,
+  `consolidated`, `lastEtlAt`, `lastConsolidateAt` — making "is it learning?" one call.
+  Meta fields are additive; no store schema bump.
+- **Probe hygiene.** Every probe that drives live Zen now runs with
+  `ZEN_EXT_MCP_NAV_MEMORY=0`, so probe traffic stops polluting the real store (16 of 40
+  learned notes were `example.com` junk). `probe-navmem.mjs` keeps capture on by design.
+
 ## Unreleased (durable tab addressing — server only, no extension change)
 
 Fixes a latent retargeting bug. Zen Workspaces scope `browser.tabs.query({})` to the

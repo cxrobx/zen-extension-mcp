@@ -170,8 +170,28 @@ async function main() {
     mcp = await startMcp(tokenPath);
     const learned = text(await tool(mcp, "get_domain_playbook", { host: "console.cloud.google.com" }));
     if (!learned.includes("fixture form")) throw new Error("M3 learned note missing");
+    const afterFirst = JSON.parse(text(await tool(mcp, "nav_memory_stats")));
+    if (afterFirst.notes < 7 || afterFirst.embeddings.present < 1) throw new Error("M4 stats missing notes/embeddings");
+    if (afterFirst.etl.created < 1 || !afterFirst.etl.lastEtlAt) throw new Error("M4 ETL counters did not move");
+    if (afterFirst.done < 1) throw new Error("M4 consumed work was not archived");
+
+    // Second session on the same host: the distiller now sees the note it wrote
+    // last time and reinforces it instead of inventing a fresh phrasing.
+    await tool(mcp, "navigate_page", { pageIdx: 0, url: "https://console.cloud.google.com/auth/clients/second" });
+    await tool(mcp, "fill", { pageIdx: 0, selector: 'css:input[name="email"]', value: "second@example.com" });
+    await new Promise((resolveP) => setTimeout(resolveP, 250));
+    mcp.stdin.end();
+    mcp = null;
+    await pollPending(navDir);
+    const secondEtl = await rawCall(token, "navMemory.etlNow", {});
+    if (secondEtl.status !== "processed") throw new Error(`M5 second ETL failed: ${JSON.stringify(secondEtl)}`);
+    mcp = await startMcp(tokenPath);
+    const reinforcedPlaybook = text(await tool(mcp, "get_domain_playbook", { host: "console.cloud.google.com" }));
+    if (!/reinforced: 2/.test(reinforcedPlaybook)) throw new Error("M5 reinforcement did not increment the note");
     const stats = JSON.parse(text(await tool(mcp, "nav_memory_stats")));
-    if (stats.notes < 7 || stats.embeddings.present < 1) throw new Error("M4 stats missing notes/embeddings");
+    if (stats.notes !== afterFirst.notes) throw new Error(`M5 reinforcement created a duplicate note: ${afterFirst.notes} -> ${stats.notes}`);
+    if (stats.etl.merged < 1) throw new Error("M5 merge counter did not move");
+    if (stats.done < 2) throw new Error("M5 second work file was not archived");
     const forgotten = text(await tool(mcp, "nav_memory_forget", { host: "console.cloud.google.com" }));
     if (!forgotten.includes("notes=7")) throw new Error(`M4 forget failed: ${forgotten}`);
     const empty = text(await tool(mcp, "get_domain_playbook", { host: "console.cloud.google.com" }));

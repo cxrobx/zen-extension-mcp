@@ -77,6 +77,7 @@ function expectError(label, r, pattern) {
 async function main() {
   const server = spawn("node", [resolve(root, "server/dist/index.js"), "--port", "8766"], {
     stdio: ["pipe", "pipe", "pipe"],
+    env: { ...process.env, ZEN_EXT_MCP_NAV_MEMORY: "0" },
   });
   server.stderr.on("data", (c) => process.stderr.write(`[mcp] ${c}`));
   await sleep(400);

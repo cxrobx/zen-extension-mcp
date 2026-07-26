@@ -26,12 +26,17 @@ const MAX_PROCESSED_IDS = 2_048;
 
 export interface StoreMeta {
   lastDecayAt: string | null;
+  lastConsolidateAt: string | null;
+  lastEtlAt: string | null;
   embeddingModel: string;
   embeddingDimension: number;
   processedWorkIds: string[];
   suppressedSeedIds: string[];
   pruned: number;
   droppedEvents: number;
+  etlCreated: number;
+  etlMerged: number;
+  consolidated: number;
 }
 
 interface StoreDocument {
@@ -46,22 +51,34 @@ export interface EtlMutation {
   mergeIntoId?: string;
 }
 
+export interface EtlBatchResult {
+  changed: number;
+  created: number;
+  merged: number;
+}
+
 export interface ForgetCounts {
   notes: number;
   pending: number;
   processing: number;
   failed: number;
+  done: number;
 }
 
 function defaultMeta(): StoreMeta {
   return {
     lastDecayAt: null,
+    lastConsolidateAt: null,
+    lastEtlAt: null,
     embeddingModel: "nomic-embed-text",
     embeddingDimension: 768,
     processedWorkIds: [],
     suppressedSeedIds: [],
     pruned: 0,
     droppedEvents: 0,
+    etlCreated: 0,
+    etlMerged: 0,
+    consolidated: 0,
   };
 }
 
@@ -100,16 +117,29 @@ function isSessionLog(value: unknown): value is NavSessionLog {
   );
 }
 
+function timestampOrNull(value: unknown): string | null {
+  return typeof value === "string" && Number.isFinite(Date.parse(value)) ? value : null;
+}
+
+function counterOrZero(value: unknown): number {
+  return Number.isInteger(value) && (value as number) >= 0 ? value as number : 0;
+}
+
 function normalizedMeta(value: unknown): StoreMeta {
   const raw = value && typeof value === "object" ? value as Partial<StoreMeta> : {};
   return {
-    lastDecayAt: typeof raw.lastDecayAt === "string" && Number.isFinite(Date.parse(raw.lastDecayAt)) ? raw.lastDecayAt : null,
+    lastDecayAt: timestampOrNull(raw.lastDecayAt),
+    lastConsolidateAt: timestampOrNull(raw.lastConsolidateAt),
+    lastEtlAt: timestampOrNull(raw.lastEtlAt),
     embeddingModel: typeof raw.embeddingModel === "string" ? raw.embeddingModel : "nomic-embed-text",
     embeddingDimension: Number.isInteger(raw.embeddingDimension) && raw.embeddingDimension! > 0 ? raw.embeddingDimension! : 768,
     processedWorkIds: Array.isArray(raw.processedWorkIds) ? raw.processedWorkIds.filter((id): id is string => typeof id === "string").slice(-MAX_PROCESSED_IDS) : [],
     suppressedSeedIds: Array.isArray(raw.suppressedSeedIds) ? raw.suppressedSeedIds.filter((id): id is string => typeof id === "string" && /^[0-9a-f]{64}$/.test(id)) : [],
-    pruned: Number.isInteger(raw.pruned) && raw.pruned! >= 0 ? raw.pruned! : 0,
-    droppedEvents: Number.isInteger(raw.droppedEvents) && raw.droppedEvents! >= 0 ? raw.droppedEvents! : 0,
+    pruned: counterOrZero(raw.pruned),
+    droppedEvents: counterOrZero(raw.droppedEvents),
+    etlCreated: counterOrZero(raw.etlCreated),
+    etlMerged: counterOrZero(raw.etlMerged),
+    consolidated: counterOrZero(raw.consolidated),
   };
 }
 
@@ -142,6 +172,7 @@ export class JsonNavStore {
   readonly pendingDir: string;
   readonly processingDir: string;
   readonly failedDir: string;
+  readonly doneDir: string;
   private notes = new Map<string, NavNote>();
   private meta: StoreMeta = defaultMeta();
   private seedVersion = 0;
@@ -152,10 +183,11 @@ export class JsonNavStore {
     this.pendingDir = join(dir, "sessions", "pending");
     this.processingDir = join(dir, "sessions", "processing");
     this.failedDir = join(dir, "sessions", "failed");
+    this.doneDir = join(dir, "sessions", "done");
   }
 
   async init(): Promise<void> {
-    for (const path of [this.dir, join(this.dir, "sessions"), this.pendingDir, this.processingDir, this.failedDir]) {
+    for (const path of [this.dir, join(this.dir, "sessions"), this.pendingDir, this.processingDir, this.failedDir, this.doneDir]) {
       await mkdir(path, { recursive: true, mode: 0o700 });
       await chmod(path, 0o700);
     }
@@ -265,13 +297,15 @@ export class JsonNavStore {
     await this.persist();
   }
 
-  async applyEtlBatch(workId: string, mutations: EtlMutation[]): Promise<number> {
-    if (this.meta.processedWorkIds.includes(workId)) return 0;
-    let changed = 0;
+  async applyEtlBatch(workId: string, mutations: EtlMutation[], at = new Date()): Promise<EtlBatchResult> {
+    if (this.meta.processedWorkIds.includes(workId)) return { changed: 0, created: 0, merged: 0 };
+    let created = 0;
+    let merged = 0;
     for (const mutation of mutations) {
       const targetId = mutation.mergeIntoId ?? mutation.note.id;
       const existing = this.notes.get(targetId);
       if (existing) {
+        merged += 1;
         const incoming = mutation.note;
         this.notes.set(targetId, {
           ...existing,
@@ -286,12 +320,15 @@ export class JsonNavStore {
         });
       } else {
         this.notes.set(incomingId(mutation), mutation.note);
+        created += 1;
       }
-      changed += 1;
     }
     this.meta.processedWorkIds = [...this.meta.processedWorkIds, workId].slice(-MAX_PROCESSED_IDS);
+    this.meta.etlCreated += created;
+    this.meta.etlMerged += merged;
+    this.meta.lastEtlAt = at.toISOString();
     await this.persist();
-    return changed;
+    return { changed: created + merged, created, merged };
   }
 
   async saveSessionLogs(logs: NavSessionLog[]): Promise<void> {
@@ -315,13 +352,14 @@ export class JsonNavStore {
     return (await readdir(dir)).filter((name) => name.endsWith(".json")).sort();
   }
 
-  async counts(): Promise<{ pending: number; processing: number; failed: number }> {
-    const [pending, processing, failed] = await Promise.all([
+  async counts(): Promise<{ pending: number; processing: number; failed: number; done: number }> {
+    const [pending, processing, failed, done] = await Promise.all([
       this.listJson(this.pendingDir),
       this.listJson(this.processingDir),
       this.listJson(this.failedDir),
+      this.listJson(this.doneDir),
     ]);
-    return { pending: pending.length, processing: processing.length, failed: failed.length };
+    return { pending: pending.length, processing: processing.length, failed: failed.length, done: done.length };
   }
 
   async claimOldest(): Promise<{ filename: string; log: NavSessionLog } | null> {
@@ -359,8 +397,19 @@ export class JsonNavStore {
     }
   }
 
+  // Consumed work is archived rather than deleted: it is the only durable
+  // record of which tools ran against which hosts, and it was already redacted
+  // on the way in. prune() enforces the cap and TTL.
   async completeWork(filename: string): Promise<void> {
-    await rm(join(this.processingDir, filename), { force: true });
+    const processing = join(this.processingDir, filename);
+    try {
+      await rename(processing, join(this.doneDir, filename));
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== "ENOENT") {
+        log.warn("nav-memory could not archive consumed work", { filename, err: (err as Error).message });
+      }
+      await rm(processing, { force: true });
+    }
   }
 
   async retryWork(filename: string, session: NavSessionLog): Promise<void> {
@@ -388,7 +437,7 @@ export class JsonNavStore {
   async prune(now = Date.now()): Promise<void> {
     const ttl = 30 * 24 * 60 * 60 * 1_000;
     let pruned = 0;
-    for (const [dir, cap] of [[this.pendingDir, 200], [this.failedDir, 50]] as const) {
+    for (const [dir, cap] of [[this.pendingDir, 200], [this.failedDir, 50], [this.doneDir, 300]] as const) {
       const files = await this.listJson(dir);
       const remove = new Set(files.slice(0, Math.max(0, files.length - cap)));
       for (const filename of files) {
@@ -429,9 +478,9 @@ export class JsonNavStore {
         notes += 1;
       }
     }
-    const raw = { pending: 0, processing: 0, failed: 0 };
+    const raw = { pending: 0, processing: 0, failed: 0, done: 0 };
     if (params.host && params.includeRaw !== false) {
-      for (const [kind, dir] of [["pending", this.pendingDir], ["processing", this.processingDir], ["failed", this.failedDir]] as const) {
+      for (const [kind, dir] of [["pending", this.pendingDir], ["processing", this.processingDir], ["failed", this.failedDir], ["done", this.doneDir]] as const) {
         for (const filename of await this.listJson(dir)) {
           try {
             const value = JSON.parse(await readFile(join(dir, filename), "utf8")) as Partial<NavSessionLog>;

@@ -100,12 +100,20 @@ export interface NavMemoryStatsResult {
   pending: number;
   processing: number;
   failed: number;
+  done: number;
   storeBytes: number;
   embeddings: {
     present: number;
     missing: number;
     model: string;
     dimension: number;
+  };
+  etl: {
+    created: number;
+    merged: number;
+    consolidated: number;
+    lastEtlAt: string | null;
+    lastConsolidateAt: string | null;
   };
   suppressedSeeds: number;
   pruned: number;
@@ -124,6 +132,7 @@ export interface NavMemoryForgetResult {
   pending: number;
   processing: number;
   failed: number;
+  done: number;
 }
 
 export interface NavMemoryEtlNowResult {

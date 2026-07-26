@@ -1807,7 +1807,7 @@ export function registerTools(
           ...(id ? { id } : { host }),
           includeRaw: includeRaw !== false,
         });
-        return ok(`forgot notes=${result.notes} pending=${result.pending} processing=${result.processing} failed=${result.failed}`);
+        return ok(`forgot notes=${result.notes} pending=${result.pending} processing=${result.processing} failed=${result.failed} done=${result.done}`);
       } catch (err) {
         return fail(err);
       }

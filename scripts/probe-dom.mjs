@@ -7,8 +7,8 @@ import { dirname, resolve } from "node:path";
 const here = dirname(fileURLToPath(import.meta.url));
 const root = resolve(here, "..");
 
-function spawnLogged(name, cmd, args) {
-  const child = spawn(cmd, args, { stdio: ["pipe", "pipe", "pipe"] });
+function spawnLogged(name, cmd, args, opts = {}) {
+  const child = spawn(cmd, args, { stdio: ["pipe", "pipe", "pipe"], ...opts });
   child.stderr.on("data", (chunk) => process.stderr.write(`[${name}] ${chunk}`));
   return child;
 }
@@ -76,11 +76,12 @@ function step(label, body) {
 async function main() {
   const targetUrl = "https://example.com/";
 
-  const server = spawnLogged("mcp", "node", [
-    resolve(root, "server/dist/index.js"),
-    "--port",
-    "8766",
-  ]);
+  const server = spawnLogged(
+    "mcp",
+    "node",
+    [resolve(root, "server/dist/index.js"), "--port", "8766"],
+    { env: { ...process.env, ZEN_EXT_MCP_NAV_MEMORY: "0" } },
+  );
   await sleep(400);
   const mcp = new McpClient(server);
 

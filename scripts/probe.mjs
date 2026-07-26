@@ -7,8 +7,8 @@ import { dirname, resolve } from "node:path";
 const here = dirname(fileURLToPath(import.meta.url));
 const root = resolve(here, "..");
 
-function spawnLogged(name, cmd, args) {
-  const child = spawn(cmd, args, { stdio: ["pipe", "pipe", "pipe"] });
+function spawnLogged(name, cmd, args, opts = {}) {
+  const child = spawn(cmd, args, { stdio: ["pipe", "pipe", "pipe"], ...opts });
   child.stderr.on("data", (chunk) => {
     process.stderr.write(`[${name}] ${chunk}`);
   });
@@ -47,11 +47,12 @@ function expectPipeJson(child, predicate, timeoutMs = 5000) {
 }
 
 async function main() {
-  const server = spawnLogged("mcp", "node", [
-    resolve(root, "server/dist/index.js"),
-    "--port",
-    "8766",
-  ]);
+  const server = spawnLogged(
+    "mcp",
+    "node",
+    [resolve(root, "server/dist/index.js"), "--port", "8766"],
+    { env: { ...process.env, ZEN_EXT_MCP_NAV_MEMORY: "0" } },
+  );
   await sleep(500);
 
   server.stdin.write(

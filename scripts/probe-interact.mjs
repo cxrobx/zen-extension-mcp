@@ -100,8 +100,8 @@ const FIXTURE_HTML = `<!doctype html>
 </body>
 </html>`;
 
-function spawnLogged(name, cmd, args) {
-  const child = spawn(cmd, args, { stdio: ["pipe", "pipe", "pipe"] });
+function spawnLogged(name, cmd, args, opts = {}) {
+  const child = spawn(cmd, args, { stdio: ["pipe", "pipe", "pipe"], ...opts });
   child.stderr.on("data", (chunk) => process.stderr.write(`[${name}] ${chunk}`));
   return child;
 }
@@ -189,11 +189,12 @@ async function main() {
   const fixtureUrl = `http://127.0.0.1:${port}/fixture`;
   console.log(`fixture serving on ${fixtureUrl}`);
 
-  const mcpProc = spawnLogged("mcp", "node", [
-    resolve(root, "server/dist/index.js"),
-    "--port",
-    "8766",
-  ]);
+  const mcpProc = spawnLogged(
+    "mcp",
+    "node",
+    [resolve(root, "server/dist/index.js"), "--port", "8766"],
+    { env: { ...process.env, ZEN_EXT_MCP_NAV_MEMORY: "0" } },
+  );
   await sleep(400);
   const mcp = new McpClient(mcpProc);
 

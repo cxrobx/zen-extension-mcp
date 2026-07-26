@@ -222,7 +222,13 @@ The daemon stores notes in an atomic, versioned JSON document and ranks exact-ho
 
 Pending telemetry is distilled in an empty temporary directory by `claude -p --safe-mode --tools "" --no-session-persistence` with schema-constrained output. There is no agentic fallback. Ollama is optional: when unavailable, deterministic ranking and normalized-text deduplication remain active, and missing embeddings are backfilled later.
 
-State directories are mode `0700` and files are `0600`. Pending work is capped at 200 files; failed work at 50; both expire after 30 days. `nav_memory_forget` deletes a note or an exact host, including its raw work by default. Forgetting a trusted seed creates a durable tombstone. Export is a copy of `notes.json`; for import, stop the daemon, replace that file with mode `0600`, and restart.
+Notes consolidate instead of accumulating. Each distill run is shown the host's existing notes as a numbered list and answers with `reinforces: <number>` when an observation confirms one, so the note's `reinforced` count grows and it outranks one-offs. An hourly sweep is the safety net for duplicates that arrive by other routes: within each host it merges pairs whose embeddings are at least 0.86 similar, summing `reinforced`, keeping the higher-confidence note, and logging every merge. Seeds can be merge targets but are never deleted.
+
+Sessions are checkpointed to disk when they go idle for 10 minutes or reach 400 events, so an abrupt daemon kill loses at most a few minutes of telemetry and long-running sessions flush continuously.
+
+State directories are mode `0700` and files are `0600`. Pending work is capped at 200 files, failed at 50, and consumed work — archived to `sessions/done/` rather than deleted, as a durable redacted usage history — at 300; all expire after 30 days. `nav_memory_forget` deletes a note or an exact host, including its raw work by default. Forgetting a trusted seed creates a durable tombstone. Export is a copy of `notes.json`; for import, stop the daemon, replace that file with mode `0600`, and restart.
+
+`nav_memory_stats` answers "is it learning?" in one call: the `etl` block reports `created` vs `merged` note mutations, `consolidated` sweep merges, and the `lastEtlAt` / `lastConsolidateAt` timestamps.
 
 ### Snapshot caching
 

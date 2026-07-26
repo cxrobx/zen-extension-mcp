@@ -1,5 +1,11 @@
 import type { NavNote } from "@zen-ext-mcp/shared";
 
+// Cosine floor for treating two same-host notes as the same fact. Measured on
+// the live store: real duplicate pairs cluster 0.864-0.888 while distinct facts
+// top out at 0.843, so 0.86 splits the gap. Shared by the ETL insert path and
+// the periodic consolidation sweep so both agree on what "duplicate" means.
+export const MERGE_SIMILARITY = 0.86;
+
 export interface Embedder {
   readonly model: string;
   readonly dimension: number;

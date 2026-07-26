@@ -1,12 +1,18 @@
 #!/usr/bin/env node
 import { spawn } from "node:child_process";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { setTimeout as sleep } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
-import { dirname, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const root = resolve(here, "..");
 const TEST_PORT = "18766";
+// Without an explicit --nav-db the daemon opens the real store in
+// ~/.config/zen-extension-mcp/nav-memory, so a smoke run would write notes
+// alongside the live daemon already writing that same file.
+const scratch = mkdtempSync(join(tmpdir(), "zen-smoke-"));
 
 function spawnLogged(name, cmd, args, opts = {}) {
   const child = spawn(cmd, args, { stdio: ["pipe", "pipe", "pipe"], ...opts });
@@ -52,6 +58,8 @@ async function main() {
     resolve(root, "daemon/dist/index.js"),
     "--port",
     TEST_PORT,
+    "--nav-db",
+    join(scratch, "nav-memory"),
   ]);
   await sleep(500);
 
@@ -59,7 +67,7 @@ async function main() {
     resolve(root, "server/dist/index.js"),
     "--port",
     TEST_PORT,
-  ]);
+  ], { env: { ...process.env, ZEN_EXT_MCP_NAV_MEMORY: "0" } });
   await sleep(500);
 
   const initialize = {
@@ -125,10 +133,12 @@ async function main() {
   server.kill("SIGTERM");
   daemon.kill("SIGTERM");
   await sleep(200);
+  rmSync(scratch, { recursive: true, force: true });
   process.exit(0);
 }
 
 main().catch((err) => {
   console.error("[smoke] FAIL:", err.message);
+  rmSync(scratch, { recursive: true, force: true });
   process.exit(1);
 });

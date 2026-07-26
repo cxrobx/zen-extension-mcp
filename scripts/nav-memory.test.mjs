@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readdir, rm, stat, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -12,9 +12,50 @@ import {
   sanitizeLocator,
 } from "../shared/dist/nav-redact.js";
 import { rankNotes } from "../daemon/dist/nav-memory/ranking.js";
+import { encodeEmbedding } from "../daemon/dist/nav-memory/embeddings.js";
 import { JsonNavStore } from "../daemon/dist/nav-memory/store.js";
 import { NavMemoryService } from "../daemon/dist/nav-memory/service.js";
 import { NavContext } from "../server/dist/nav-memory.js";
+
+const offlineEmbedder = (dimension = 3) => ({
+  model: "fake",
+  dimension,
+  async isAvailable() { return false; },
+  async embedDocuments() { return []; },
+  async embedQuery() { return new Float32Array([1, 0, 0]); },
+  status() { return { available: false, lastCheckedAt: null }; },
+});
+
+function fixtureNote(overrides) {
+  const stamp = "2025-05-01T00:00:00.000Z";
+  return {
+    id: "a".repeat(64),
+    host: "dupe.example",
+    registrableDomain: "dupe.example",
+    pathGlob: null,
+    kind: "selector",
+    summary: "A fixture note.",
+    detail: "A fixture detail.",
+    example: null,
+    tools: [],
+    success: true,
+    confidence: 0.5,
+    reinforced: 1,
+    createdAt: stamp,
+    lastSeenAt: stamp,
+    source: null,
+    embedding: null,
+    ...overrides,
+  };
+}
+
+function vector(values) {
+  return encodeEmbedding(Float32Array.from(values));
+}
+
+function fixtureEvent(clock, overrides = {}) {
+  return { ts: clock.getTime(), tool: "fill", host: "example.com", path: "/form", ok: true, ...overrides };
+}
 
 test("normalization redacts identifiers and isolates private suffix tenants", () => {
   const value = normalizeUrl("https://User:pass@example.com/x");
@@ -84,7 +125,7 @@ test("store permissions, ETL idempotency, and durable seed suppression", async (
     assert.equal(first.status, "processed");
     const learned = store.allNotes().find((note) => note.host === "example.com");
     assert.ok(learned);
-    assert.equal(await store.applyEtlBatch(first.workId, [{ note: learned }]), 0);
+    assert.equal((await store.applyEtlBatch(first.workId, [{ note: learned }])).changed, 0);
     assert.equal(store.allNotes().find((note) => note.id === learned.id).reinforced, 1);
     const seedId = store.allNotes().find((note) => note.source?.seed)?.id;
     await store.forget({ id: seedId });
@@ -180,6 +221,209 @@ test("failed ETL reaches quarantine and decay uses elapsed time", async () => {
     await service.stop();
   } finally {
     delete process.env.ZEN_EXT_MCP_NAV_ETL_PROBE;
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("distiller reinforcement merges into the referenced note and rejects bad indexes", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "nav-reinforce-test-"));
+  const original = "The fixture form exposes a stable email locator.";
+  const seen = [];
+  let mode = "create";
+  const body = (summary, extra = {}) => ({
+    kind: "selector",
+    summary,
+    detail: "The input is reachable through its structural name attribute.",
+    tools: ["fill"],
+    success: true,
+    confidence: 0.6,
+    ...extra,
+  });
+  const distiller = {
+    async distill(session, existing) {
+      seen.push(existing);
+      if (mode === "create") return [body(original)];
+      if (mode === "reinforce") {
+        const index = existing.findIndex((note) => note.summary === original);
+        return [body("A rephrasing of the same locator fact.", { reinforces: index + 1 })];
+      }
+      return [body("An unrelated observation about redirects.", { reinforces: 99 })];
+    },
+  };
+  const clock = new Date("2025-06-01T00:00:00.000Z");
+  try {
+    const store = new JsonNavStore(dir);
+    const service = new NavMemoryService(store, distiller, offlineEmbedder(), () => clock);
+    await service.init();
+    process.env.ZEN_EXT_MCP_NAV_ETL_PROBE = "1";
+    const run = async (connId) => {
+      await service.handleRequest({ connId, containerScope: null }, "navMemory.recordEvents", { events: [fixtureEvent(clock)] });
+      await service.onSessionEnd(connId);
+      return service.handleRequest({ connId: "probe", containerScope: null }, "navMemory.etlNow", {});
+    };
+
+    await run("c1");
+    const learned = store.allNotes().filter((note) => note.host === "example.com");
+    assert.equal(learned.length, 1);
+    assert.equal(learned[0].reinforced, 1);
+    assert.deepEqual(seen[0], []);
+
+    mode = "reinforce";
+    await run("c2");
+    const afterReinforce = store.allNotes().filter((note) => note.host === "example.com");
+    assert.equal(afterReinforce.length, 1, "reinforcement must not create a second note");
+    assert.equal(afterReinforce[0].id, learned[0].id);
+    assert.equal(afterReinforce[0].reinforced, 2);
+    assert.equal(seen[1].length, 1, "the distiller must be shown the host's known notes");
+    assert.equal(seen[1][0].summary, original);
+
+    mode = "invalid";
+    await run("c3");
+    const afterInvalid = store.allNotes().filter((note) => note.host === "example.com");
+    assert.equal(afterInvalid.length, 2, "an out-of-range reinforces must fall back to a new note");
+    assert.equal(afterInvalid.find((note) => note.id === learned[0].id).reinforced, 2);
+    assert.ok(store.getMeta().etlCreated >= 2 && store.getMeta().etlMerged >= 1);
+    assert.ok(store.getMeta().lastEtlAt);
+    await service.stop();
+  } finally {
+    delete process.env.ZEN_EXT_MCP_NAV_ETL_PROBE;
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("consolidation sweep merges near-duplicates hourly and never deletes a seed", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "nav-consolidate-test-"));
+  let clock = new Date("2025-06-01T00:00:00.000Z");
+  const distiller = { async distill() { return []; } };
+  try {
+    const store = new JsonNavStore(dir);
+    const service = new NavMemoryService(store, distiller, offlineEmbedder(), () => new Date(clock));
+    await service.init();
+    await store.updateNotes([
+      fixtureNote({ id: "a".repeat(64), summary: "Original phrasing.", confidence: 0.6, reinforced: 1, createdAt: "2025-01-01T00:00:00.000Z", embedding: vector([1, 0, 0]) }),
+      fixtureNote({ id: "b".repeat(64), summary: "Reinvented phrasing.", confidence: 0.5, reinforced: 3, createdAt: "2025-04-01T00:00:00.000Z", lastSeenAt: "2025-05-20T00:00:00.000Z", tools: ["click"], embedding: vector([0.9, 0.43589, 0]) }),
+      fixtureNote({ id: "c".repeat(64), summary: "A genuinely different fact.", embedding: vector([0, 1, 0]) }),
+      fixtureNote({ id: "d".repeat(64), host: "seeded.example", registrableDomain: "seeded.example", summary: "Seeded knowledge.", confidence: 0.3, source: { seed: true, seedVersion: 1 }, embedding: vector([1, 0, 0]) }),
+      fixtureNote({ id: "e".repeat(64), host: "seeded.example", registrableDomain: "seeded.example", summary: "Learned restatement.", confidence: 0.6, reinforced: 2, embedding: vector([1, 0, 0]) }),
+    ]);
+
+    await service.tick();
+    const kept = store.allNotes().find((note) => note.id === "a".repeat(64));
+    assert.ok(kept, "the higher-confidence note is the merge target");
+    assert.equal(store.allNotes().some((note) => note.id === "b".repeat(64)), false);
+    assert.equal(kept.reinforced, 4, "reinforced counts are summed");
+    assert.equal(kept.createdAt, "2025-01-01T00:00:00.000Z", "the earliest createdAt survives");
+    assert.equal(kept.lastSeenAt, "2025-05-20T00:00:00.000Z", "the latest lastSeenAt survives");
+    assert.deepEqual(kept.tools, ["click"]);
+    assert.ok(store.allNotes().some((note) => note.id === "c".repeat(64)), "a below-threshold pair is untouched");
+    const seed = store.allNotes().find((note) => note.id === "d".repeat(64));
+    assert.ok(seed?.source?.seed, "a seed is a merge target, never a deleted source");
+    assert.equal(seed.reinforced, 3);
+    assert.equal(seed.confidence, 0.6);
+    assert.equal(store.allNotes().some((note) => note.id === "e".repeat(64)), false);
+    assert.equal(store.getMeta().consolidated, 2);
+
+    clock = new Date(clock.getTime() + 30 * 60_000);
+    await store.updateNotes([
+      fixtureNote({ id: "1".repeat(64), host: "later.example", summary: "Fresh pair one.", embedding: vector([0, 0, 1]) }),
+      fixtureNote({ id: "2".repeat(64), host: "later.example", summary: "Fresh pair two.", embedding: vector([0, 0, 1]) }),
+    ]);
+    await service.tick();
+    assert.equal(store.allNotes().filter((note) => note.host === "later.example").length, 2, "the sweep is throttled to hourly");
+
+    clock = new Date(clock.getTime() + 31 * 60_000);
+    await service.tick();
+    assert.equal(store.allNotes().filter((note) => note.host === "later.example").length, 1);
+    assert.equal(store.getMeta().consolidated, 3);
+    assert.ok(store.getMeta().lastConsolidateAt);
+    await service.stop();
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("idle sessions checkpoint to disk and high-water flushes before events drop", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "nav-checkpoint-test-"));
+  let clock = new Date("2025-06-01T00:00:00.000Z");
+  const distiller = { async distill() { return []; } };
+  try {
+    const store = new JsonNavStore(dir);
+    const service = new NavMemoryService(store, distiller, offlineEmbedder(), () => new Date(clock));
+    await service.init();
+    await service.handleRequest({ connId: "idle", containerScope: null }, "navMemory.recordEvents", { events: [fixtureEvent(clock)] });
+    assert.equal((await store.counts()).pending, 0, "an active session stays in memory");
+
+    clock = new Date(clock.getTime() + 11 * 60_000);
+    await service.tick();
+    assert.equal((await store.counts()).done, 1, "the idle session was flushed and consumed");
+
+    await service.onSessionEnd("idle");
+    assert.equal((await store.counts()).pending, 0, "the checkpointed session state was reset");
+    await service.handleRequest({ connId: "idle", containerScope: null }, "navMemory.recordEvents", { events: [fixtureEvent(clock)] });
+    await service.onSessionEnd("idle");
+    assert.equal((await store.counts()).pending, 1, "the next event starts a fresh session");
+
+    let dropped = 0;
+    for (let batch = 0; batch < 8; batch++) {
+      const events = Array.from({ length: 50 }, () => fixtureEvent(clock, { host: "high-water.example" }));
+      const result = await service.handleRequest({ connId: "busy", containerScope: null }, "navMemory.recordEvents", { events });
+      dropped += result.dropped;
+    }
+    assert.equal(dropped, 0, "the high-water flush happens before the shift-drop cap");
+    const files = (await readdir(join(dir, "sessions", "pending"))).filter((name) => name.endsWith(".json"));
+    assert.equal(files.length, 2);
+    const sizes = await Promise.all(files.map(async (name) => {
+      const parsed = JSON.parse(await readFile(join(dir, "sessions", "pending", name), "utf8"));
+      return parsed.events.length;
+    }));
+    assert.ok(sizes.includes(400), "the flushed session kept every event it accepted");
+    await service.stop();
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("consumed work is archived, retention-capped, and purged by forget", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "nav-done-test-"));
+  try {
+    const store = new JsonNavStore(dir);
+    await store.init();
+    const session = (host) => ({
+      schemaVersion: 1,
+      workId: `work-${host}`,
+      host,
+      registrableDomain: host,
+      container: null,
+      startedAt: "2025-06-01T00:00:00.000Z",
+      endedAt: "2025-06-01T00:01:00.000Z",
+      attempts: 0,
+      events: [{ ts: Date.now(), tool: "click", host, path: "/", ok: true }],
+    });
+    await store.saveSessionLogs([session("archived.example")]);
+    const claimed = await store.claimOldest();
+    await store.completeWork(claimed.filename);
+    let counts = await store.counts();
+    assert.equal(counts.processing, 0);
+    assert.equal(counts.done, 1, "consumed work is archived instead of deleted");
+    const archived = JSON.parse(await readFile(join(dir, "sessions", "done", claimed.filename), "utf8"));
+    assert.equal(archived.events[0].tool, "click");
+
+    const forgotten = await store.forget({ host: "archived.example", includeRaw: true });
+    assert.equal(forgotten.done, 1);
+    assert.equal((await store.counts()).done, 0);
+
+    await store.saveSessionLogs([session("stale.example")]);
+    const second = await store.claimOldest();
+    await store.completeWork(second.filename);
+    const stale = join(dir, "sessions", "done", second.filename);
+    const old = new Date(Date.now() - 31 * 24 * 60 * 60 * 1_000);
+    await utimes(stale, old, old);
+    await store.prune(Date.now());
+    counts = await store.counts();
+    assert.equal(counts.done, 0, "the done archive honours the 30-day TTL");
+    assert.ok(store.getMeta().pruned >= 1);
+    await store.close();
+  } finally {
     await rm(dir, { recursive: true, force: true });
   }
 });
