@@ -1,6 +1,8 @@
 # zen-mcp
 
-WebExtension-backed MCP for Zen / Firefox. Sister project to `zen-mcp` (a local fork of [`firefox-devtools-mcp`](https://github.com/mozilla/firefox-devtools-mcp)), which uses Marionette/Selenium and requires launching the browser with flags. This one lives as a permanently-installed signed extension in your daily Zen — no flags, no restarts, container scoping per MCP entry.
+WebExtension-backed MCP for Zen / Firefox. It lives as a permanently-installed signed extension in your daily browser — **no launch flags, no restarts**, container scoping per MCP entry.
+
+That is the whole design premise. Marionette/WebDriver-based browser MCPs (including [`firefox-devtools-mcp`](https://github.com/mozilla/firefox-devtools-mcp), which this project once had a sibling fork of) reach further into the browser, but they require launching it with `--marionette`, so they can't drive the browser you already have open with all your sessions in it. This one trades that reach for actually being usable every day.
 
 ```
 Claude Code  --stdio-->  MCP server (per session, --container-scoped)
@@ -14,15 +16,22 @@ Claude Code  --stdio-->  MCP server (per session, --container-scoped)
                          MV3 extension (signed, in daily Zen)
 ```
 
-## When to use this vs `zen-mcp`
+## What this is good for, and what it can't do
 
-| Use this | Use `zen-mcp` |
+Use it when the automation has to happen **in your real browser** — authenticated dashboards, admin consoles, anything behind a login — or when you want several container-scoped MCP entries (`zen-cxv`, `zen-personal`, …) sharing one running browser that never gets interrupted.
+
+The current surface is **41 tools** (38 browser tools plus 3 local navigation-memory tools).
+
+What the MV3 sandbox puts out of reach, and what to use instead:
+
+| Out of reach | Use instead |
 |---|---|
-| Day-to-day automation in your real Zen | Need privileged-context tools (`evaluate_privileged_script`, `set_firefox_prefs`) |
-| Multiple container-scoped MCP entries (`zen-cxv`, `zen-personal`, etc.) sharing one browser | Need full network capture with response bodies |
-| Browser must keep running uninterrupted | Need reliable `upload_file_by_uid` |
+| Browser prefs (`set_firefox_prefs`) | `user.js` or `about:config` |
+| Chrome-privileged JS (driving the browser's own UI) | not available — this is a hard WebExtension boundary |
+| File upload by path | Playwright, for anything that doesn't need your session |
+| Full network response bodies | reachable but not yet built — `webRequest.filterResponseData()` (Firefox-only MV3 API; needs `webRequest` + `webRequestBlocking` + `webRequestFilterResponse`) |
 
-The two coexist. They run different daemons by default. The current surface is **41 tools** (38 browser tools plus 3 local navigation-memory tools); privileged browser-control gaps stay in `zen-mcp`.
+A Marionette mode was considered and deliberately rejected: it would still need the launch flag (so it would be dark by default), and the privileged tools additionally need `--remote-allow-system-access`, which exposes **unauthenticated** chrome-privileged execution to anything that can open a socket to `127.0.0.1:2828`.
 
 ## Tool surface
 
@@ -83,7 +92,7 @@ Two limits worth knowing. Reuse only sees the **active Zen workspace**, so a mat
 
 Failure modes are loud on purpose: a rule naming a container that does not exist **errors and opens nothing**, because a silent fallback is how a login ends up in the wrong jar. A missing file is simply "no rules"; a malformed one reports the parse error instead of looking empty. Inspect the live state with `container_routes` (add `url` to see how one URL resolves, `reload: true` after editing the file) or the `mcp.containerRoutes` line in `get_firefox_info`. Set `ZEN_MCP_CONTAINER_ROUTES=0` to switch routing off for an entry.
 
-Dropped from `zen-mcp` because no WebExtension equivalent: `list_privileged_contexts` / `select_privileged_context` / `evaluate_privileged_script`, `set_firefox_prefs` / `get_firefox_prefs`, `restart_firefox`, `upload_file_by_uid`, `install_extension` / `list_extensions` / `uninstall_extension`.
+Tools the Marionette-based predecessor had that have **no WebExtension equivalent**, and so are absent here by design: `list_privileged_contexts` / `select_privileged_context` / `evaluate_privileged_script`, `set_firefox_prefs` / `get_firefox_prefs`, `restart_firefox`, `upload_file_by_uid`, `install_extension` / `list_extensions` / `uninstall_extension`.
 
 Deferred to v2 (need degraded-fidelity content-script bridges): `list_console_messages`, `clear_console_messages`, `list_network_requests`, `get_network_request`, `accept_dialog`, `dismiss_dialog`, `screenshot_by_uid`, full-page screenshot.
 

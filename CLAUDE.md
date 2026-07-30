@@ -1,12 +1,14 @@
 # zen-mcp — agent guide
 
-WebExtension-backed MCP for Zen (Firefox). Sister project to `~/Projects/zen-mcp` (Marionette/Selenium). User docs in `README.md`; this file is for an agent working on the codebase.
+WebExtension-backed MCP for Zen (Firefox). User docs in `README.md`; this file is for an agent working on the codebase.
 
-## You are in the daily driver — never implement new tools in `~/Projects/zen-mcp`
+## This is the only Zen MCP — there is no escape hatch
 
-All seven `zen-*` entries in `claude mcp list` point at **this** repo. `~/Projects/zen-mcp` is a Marionette-based escape hatch retained only for privileged-context tools the WebExtension API can't do (`set_firefox_prefs`, `evaluate_privileged_script`, full network response bodies, file uploads). If a task is "add a tool" or "fix a tool used in a Claude Code session", the work goes here.
+All seven `zen-*` entries in `claude mcp list` point at **this** repo, and nothing else drives Zen. Renamed from `zen-extension-mcp` on 2026-07-29, taking the name from a Marionette/Selenium fork of [`firefox-devtools-mcp`](https://github.com/mozilla/firefox-devtools-mcp) that was **archived and deleted** the same day (bundle: `~/Archives/zen-mcp-marionette-30d675c.bundle`). That fork had never been registered in any MCP scope, so it was unreachable from every session.
 
-Before doing anything: `claude mcp list | grep zen` to confirm what's wired up. If you find yourself editing files under `~/Projects/zen-mcp/src/`, you've taken a wrong turn.
+**Do not go looking for a privileged fallback, and do not propose adding a Marionette mode here.** It was measured and rejected: Marionette needs the `--marionette` launch flag (the `marionette.enabled` pref alone does not open port 2828 — verified), so such tools would be dark by default and would demand quitting the user's real browser. The privileged ones additionally need `--remote-allow-system-access`, which exposes **unauthenticated** chrome-privileged JS to any local process, in a browser holding banking and client sessions. Full rationale: the `project_zen_mcp_consolidation` memory.
+
+Before doing anything: `claude mcp list | grep zen` to confirm what's wired up.
 
 ## Three processes, one bridge
 
@@ -30,7 +32,7 @@ Claude Code  --stdio-->  MCP server (per session, --container-scoped)
 ## Daily-driver state (already set up)
 
 - Daemon: launchd `~/Library/LaunchAgents/io.cxrobx.zen-mcp.daemon.plist` → `/usr/local/bin/node` runs `daemon/dist/index.js --port 8766`. Logs at `~/Library/Logs/zen-mcp/daemon.{out,err}.log`.
-- Extension: signed via AMO unlisted, gecko id `zen-ext-mcp@cxrobx`, currently 0.0.15. Settings (URL + token) live in `browser.storage.local`; snapshot UID maps live in `browser.storage.session`.
+- Extension: signed via AMO unlisted, gecko id `zen-ext-mcp@cxrobx` (**deliberately NOT renamed** — a new id means a new AMO listing and a reinstall that wipes `browser.storage.local`), currently 0.0.17. Settings (URL + token) live in `browser.storage.local`; snapshot UID maps live in `browser.storage.session`.
 - Auth token: `~/.config/zen-mcp/auth.token` (mode 0600, 32-byte hex). Daemon generates on first launch.
 - AMO signing creds: `~/.config/zen-mcp/.env` (mode 0600, `AMO_KEY` + `AMO_SECRET`). Sourced by `extension/scripts/sign.sh`; `npm run extension:sign` works with no inline env. Get fresh keys at https://addons.mozilla.org/developers/addon/api/key/.
 - 7 MCP entries at user scope (`~/.claude.json`): `zen-ext`, `zen-cxv`, `zen-personal`, `zen-geek`, `zen-music`, `zen-buildersbuddy`, `zen-artist`.
@@ -99,7 +101,7 @@ After any extension change, run the relevant probe(s) — `npm run build` doesn'
 - **CSP `upgrade-insecure-requests`** is in Firefox MV3's default extension CSP and silently rewrites `ws://127.0.0.1` to `wss://`. The daemon doesn't speak TLS so the connection hangs in CONNECTING. The manifest already overrides this (`content_security_policy.extension_pages` without that directive). **Don't remove that override.**
 - **`<all_urls>` is opt-in by user in MV3.** Declared in manifest ≠ granted at runtime. User must toggle "Access your data for all websites" in `about:addons`. `screenshot_page` (`tabs.captureVisibleTab`) needs this; `scripting.executeScript` works without.
 - **`captureVisibleTab(windowId, opts)`** rejects with "Missing activeTab permission" in Zen even with `<all_urls>`. The fix already shipped: activate the target tab first, then call `captureVisibleTab(opts)` with no windowId.
-- **MV3 backgrounds suspend** after ~80s of "idle" in Firefox 147 even with active WebSockets. The 30s `browser.alarms` keepalive keeps the background alive AND force-reconnects when `ws.readyState !== OPEN`. **Don't remove this** without a replacement strategy.
+- **MV3 backgrounds suspend** after ~80s of "idle" in Firefox 147 even with active WebSockets (keepalive re-verified on Firefox 153 / Zen 1.21.9b: still required, still works). The 30s `browser.alarms` keepalive keeps the background alive AND force-reconnects when `ws.readyState !== OPEN`. **Don't remove this** without a replacement strategy.
 - **Snapshot UID maps are in `browser.storage.session`.** Keep writes small and keyed by tabId. Clear both memory and session storage on navigation invalidation.
 - **Rich-editor `fill`/`type` can't rely on `execCommand("insertText")`.** Firefox gates editing execCommands on `document.hasFocus()`, which is false during background automation — and on framework editors (Lexical/ProseMirror/Slate) it then *lies*, returning `true` while inserting nothing. `richInsert` (`handlers.ts`) gates execCommand on `hasFocus`, else dispatches a synthetic `beforeinput` + explicit Range and **verifies by DOM readback** (~20ms reconcile, measured on Lexical). Only fire `input` yourself when the editor did **not** claim the `beforeinput` (`preventDefault`), or the text double-inserts. If the readback still fails, `runFillLike` escalates to focus-the-window-then-retry (the only path that gives execCommand a trusted, working beforeinput). **Don't "simplify" this back to `textContent = value` or to trusting execCommand's return.**
 - **Connect must be idempotent and resilient to stale ws.** `connect()` treats CLOSED/CLOSING as null. The keepalive uses `isHealthy()` (`ws.readyState === OPEN`) not the cached state field — state lies after asymmetric WS shutdown.
@@ -127,7 +129,7 @@ After any extension change, run the relevant probe(s) — `npm run build` doesn'
 | Nav-memory capture and injection | `server/src/nav-memory.ts` |
 | MCP tool registrations | `server/src/tools.ts` |
 | Locator-prefix parser (`css:`/`xpath:`/`text:`/`text*:`/`role:`) | `server/src/locator.ts` |
-| Container resolver (ported from `zen-mcp`) | `server/src/container.ts` |
+| Container resolver (ported from the archived Marionette fork) | `server/src/container.ts` |
 | Host→container route table (load, match, describe) | `server/src/routes.ts` · config `~/.config/zen-mcp/containers.json` |
 | Daemon WS client (used by MCP server) | `server/src/daemon-client.ts` |
 | Extension RPC handlers (pages.*, dom.*, cookies, storage, etc.) | `extension/src/handlers.ts` |
@@ -143,7 +145,7 @@ After any extension change, run the relevant probe(s) — `npm run build` doesn'
 Still gaps as of this writing:
 
 - **Console messages**, **dialog handling** (`accept_dialog` / `dismiss_dialog`), **network capture / full network response bodies**. Content-script bridges with degraded fidelity. Still v2.
-- **Privileged-context tools** — fundamental WebExtension capability gap. Use `~/Projects/zen-mcp` for those.
+- **Privileged-context tools** — fundamental WebExtension capability gap, and now permanently out of scope (see the top of this file). Prefs go through `user.js` / `about:config`; there is no chrome-privileged path.
 - **File upload by UID** — browser security blocks it from any extension.
 - **Multi-window management** — `tab.windowId` flows through `PageInfo` but there are no window-level tools (focus, move, resize).
 
@@ -159,4 +161,4 @@ If you're adding any of these, double-check the README's "Tool surface" table an
 
 ## License
 
-MIT OR Apache-2.0 (matches `zen-mcp`).
+MIT OR Apache-2.0 (inherited from the `firefox-devtools-mcp` lineage).
