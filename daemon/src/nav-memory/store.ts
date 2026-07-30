@@ -17,8 +17,8 @@ import {
   type NavEventRecord,
   type NavNote,
   type NavSessionLog,
-} from "@zen-ext-mcp/shared";
-import { normalizeHost, registrableDomain, sanitizeLocator, truncateUtf8, validPathGlob } from "@zen-ext-mcp/shared/nav-redact";
+} from "@zen-mcp/shared";
+import { normalizeHost, registrableDomain, sanitizeLocator, truncateUtf8, validPathGlob } from "@zen-mcp/shared/nav-redact";
 import { log } from "../log.js";
 
 const STORE_SCHEMA_VERSION = 1;

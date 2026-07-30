@@ -5,7 +5,7 @@ import {
   encode,
   type RequestMessage,
   type WireMessage,
-} from "@zen-ext-mcp/shared";
+} from "@zen-mcp/shared";
 import { handlers } from "./handlers.js";
 
 const RECONNECT_BASE_MS = 500;

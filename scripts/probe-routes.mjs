@@ -76,7 +76,7 @@ class McpClient {
 async function startServer(env) {
   const child = spawn("node", [resolve(root, "server/dist/index.js"), "--port", "8766"], {
     stdio: ["pipe", "pipe", "pipe"],
-    env: { ...process.env, ZEN_EXT_MCP_NAV_MEMORY: "0", ...env },
+    env: { ...process.env, ZEN_MCP_NAV_MEMORY: "0", ...env },
   });
   child.stderr.on("data", (c) => process.stderr.write(`[mcp] ${c}`));
   await sleep(400);
@@ -161,7 +161,7 @@ async function main() {
       JSON.stringify({ routes: { [PROBE_CONTAINER]: [PROBE_HOST] } }, null, 2),
       "utf8",
     );
-    probe = await startServer({ ZEN_EXT_MCP_ROUTES: routeFile });
+    probe = await startServer({ ZEN_MCP_ROUTES: routeFile });
     await closeProbeTabs(probe.client, "pre-clean");
 
     const before = tabSnapshot(expectOk("list_pages (baseline)", await probe.client.callTool("list_pages")).text);

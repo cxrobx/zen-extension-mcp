@@ -1,5 +1,5 @@
 {
-  "name": "zen-extension-mcp",
+  "name": "zen-mcp",
   "version": "0.0.1",
   "private": true,
   "description": "WebExtension-backed MCP for Zen/Firefox: daemon + MCP server + MV3 extension talking over a localhost WebSocket.",

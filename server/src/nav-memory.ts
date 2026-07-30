@@ -4,13 +4,13 @@ import {
   type NavMemoryQueryResult,
   type NavMemoryRecordEventsResult,
   type PageInfo,
-} from "@zen-ext-mcp/shared";
+} from "@zen-mcp/shared";
 import {
   normalizeHost,
   normalizeUrl,
   redactText,
   sanitizeLocator,
-} from "@zen-ext-mcp/shared/nav-redact";
+} from "@zen-mcp/shared/nav-redact";
 import type { DaemonClient } from "./daemon-client.js";
 
 export const NAV_TOOL_META = Symbol("nav-tool-meta");

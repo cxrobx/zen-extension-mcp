@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# Wrapper for `web-ext sign` that loads AMO creds from ~/.config/zen-extension-mcp/.env
+# Wrapper for `web-ext sign` that loads AMO creds from ~/.config/zen-mcp/.env
 # unless they are already exported in the environment.
 set -euo pipefail
 
-ENV_FILE="${ZEN_EXT_ENV_FILE:-$HOME/.config/zen-extension-mcp/.env}"
+ENV_FILE="${ZEN_EXT_ENV_FILE:-$HOME/.config/zen-mcp/.env}"
 
 if [ -z "${AMO_KEY:-}" ] || [ -z "${AMO_SECRET:-}" ]; then
   if [ -f "$ENV_FILE" ]; then

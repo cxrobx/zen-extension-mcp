@@ -51,7 +51,7 @@ async function main() {
     "mcp",
     "node",
     [resolve(root, "server/dist/index.js"), "--port", "8766"],
-    { env: { ...process.env, ZEN_EXT_MCP_NAV_MEMORY: "0" } },
+    { env: { ...process.env, ZEN_MCP_NAV_MEMORY: "0" } },
   );
   await sleep(500);
 

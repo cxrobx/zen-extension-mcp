@@ -241,7 +241,7 @@ async function startServer(tokenPath, extraArgs, env) {
     [resolve(root, "server/dist/index.js"), "--port", String(PORT), "--token-file", tokenPath, ...extraArgs],
     {
       stdio: ["pipe", "pipe", "pipe"],
-      env: { ...process.env, ZEN_EXT_MCP_NAV_MEMORY: "0", ...env },
+      env: { ...process.env, ZEN_MCP_NAV_MEMORY: "0", ...env },
     },
   );
   child.stderr.resume();
@@ -294,12 +294,12 @@ before(async () => {
     }
   }
 
-  const a = await startServer(tokenPath, [], { ZEN_EXT_MCP_ROUTES: routeFile });
+  const a = await startServer(tokenPath, [], { ZEN_MCP_ROUTES: routeFile });
   unscoped = a.child;
   mcp = a.client;
 
   // A container-scoped server, the zen-artist shape: routes must still win over its default.
-  const b = await startServer(tokenPath, ["--container", "Personal"], { ZEN_EXT_MCP_ROUTES: routeFile });
+  const b = await startServer(tokenPath, ["--container", "Personal"], { ZEN_MCP_ROUTES: routeFile });
   scoped = b.child;
   mcpScoped = b.client;
 });
@@ -316,12 +316,12 @@ after(async () => {
 // --- pure matcher -----------------------------------------------------------------------
 
 test("a rule matches its host and its subdomains, and pins ports when asked", async (t) => {
-  const previous = process.env.ZEN_EXT_MCP_ROUTES;
-  process.env.ZEN_EXT_MCP_ROUTES = routeFile;
+  const previous = process.env.ZEN_MCP_ROUTES;
+  process.env.ZEN_MCP_ROUTES = routeFile;
   const table = reloadRouteTable();
   t.after(() => {
-    if (previous === undefined) delete process.env.ZEN_EXT_MCP_ROUTES;
-    else process.env.ZEN_EXT_MCP_ROUTES = previous;
+    if (previous === undefined) delete process.env.ZEN_MCP_ROUTES;
+    else process.env.ZEN_MCP_ROUTES = previous;
     reloadRouteTable();
   });
 
@@ -338,7 +338,7 @@ test("a rule matches its host and its subdomains, and pins ports when asked", as
 });
 
 test("a more specific rule wins, and *. excludes the apex", async (t) => {
-  const previous = process.env.ZEN_EXT_MCP_ROUTES;
+  const previous = process.env.ZEN_MCP_ROUTES;
   const file = join(dir, "specificity.json");
   await writeFile(
     file,
@@ -351,11 +351,11 @@ test("a more specific rule wins, and *. excludes the apex", async (t) => {
     }),
     "utf8",
   );
-  process.env.ZEN_EXT_MCP_ROUTES = file;
+  process.env.ZEN_MCP_ROUTES = file;
   const table = reloadRouteTable();
   t.after(() => {
-    if (previous === undefined) delete process.env.ZEN_EXT_MCP_ROUTES;
-    else process.env.ZEN_EXT_MCP_ROUTES = previous;
+    if (previous === undefined) delete process.env.ZEN_MCP_ROUTES;
+    else process.env.ZEN_MCP_ROUTES = previous;
     reloadRouteTable();
   });
 
@@ -366,29 +366,29 @@ test("a more specific rule wins, and *. excludes the apex", async (t) => {
 });
 
 test("a broken or absent route file reports itself instead of looking empty", async (t) => {
-  const previous = process.env.ZEN_EXT_MCP_ROUTES;
+  const previous = process.env.ZEN_MCP_ROUTES;
   const broken = join(dir, "broken.json");
   await writeFile(broken, "{ not json", "utf8");
   t.after(() => {
-    if (previous === undefined) delete process.env.ZEN_EXT_MCP_ROUTES;
-    else process.env.ZEN_EXT_MCP_ROUTES = previous;
+    if (previous === undefined) delete process.env.ZEN_MCP_ROUTES;
+    else process.env.ZEN_MCP_ROUTES = previous;
     reloadRouteTable();
   });
 
-  process.env.ZEN_EXT_MCP_ROUTES = broken;
+  process.env.ZEN_MCP_ROUTES = broken;
   const bad = reloadRouteTable();
   assert.equal(bad.rules.length, 0);
   assert.match(bad.error, /invalid JSON/);
 
-  process.env.ZEN_EXT_MCP_ROUTES = join(dir, "does-not-exist.json");
+  process.env.ZEN_MCP_ROUTES = join(dir, "does-not-exist.json");
   const missing = reloadRouteTable();
   assert.equal(missing.loaded, false);
   assert.equal(missing.error, null, "an absent file is the default state, not an error");
 
-  process.env.ZEN_EXT_MCP_ROUTES = routeFile;
-  process.env.ZEN_EXT_MCP_CONTAINER_ROUTES = "0";
+  process.env.ZEN_MCP_ROUTES = routeFile;
+  process.env.ZEN_MCP_CONTAINER_ROUTES = "0";
   const off = reloadRouteTable();
-  delete process.env.ZEN_EXT_MCP_CONTAINER_ROUTES;
+  delete process.env.ZEN_MCP_CONTAINER_ROUTES;
   assert.equal(off.enabled, false);
   assert.equal(matchContainerRoute(off, "https://artistadvisory.io/"), null);
 });

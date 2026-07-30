@@ -1,4 +1,4 @@
-import type { FirefoxContainer } from "@zen-ext-mcp/shared";
+import type { FirefoxContainer } from "@zen-mcp/shared";
 
 export function formatContainer(container: FirefoxContainer): string {
   return `${container.name} (${container.cookieStoreId})`;

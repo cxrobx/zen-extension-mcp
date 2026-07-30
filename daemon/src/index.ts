@@ -12,7 +12,7 @@ import {
   type RequestMessage,
   type ResponseMessage,
   type WireMessage,
-} from "@zen-ext-mcp/shared";
+} from "@zen-mcp/shared";
 import { defaultAuthPath, loadOrCreateToken, tokensEqual } from "./auth.js";
 import { log } from "./log.js";
 import { ClaudeDistiller } from "./nav-memory/distill.js";
@@ -38,13 +38,13 @@ function parseArgs(argv: string[]): CliOptions {
   let port = DEFAULT_DAEMON_PORT;
   let host = DEFAULT_DAEMON_HOST;
   let tokenPath = defaultAuthPath();
-  let navDbPath = process.env.ZEN_EXT_MCP_NAV_DB ?? join(dirname(defaultAuthPath()), "nav-memory");
-  let claudeBin = process.env.ZEN_EXT_MCP_CLAUDE_BIN ?? "claude";
-  const envPort = process.env.ZEN_EXT_MCP_PORT;
+  let navDbPath = process.env.ZEN_MCP_NAV_DB ?? join(dirname(defaultAuthPath()), "nav-memory");
+  let claudeBin = process.env.ZEN_MCP_CLAUDE_BIN ?? "claude";
+  const envPort = process.env.ZEN_MCP_PORT;
   if (envPort) port = Number.parseInt(envPort, 10);
-  const envHost = process.env.ZEN_EXT_MCP_HOST;
+  const envHost = process.env.ZEN_MCP_HOST;
   if (envHost) host = envHost;
-  const envToken = process.env.ZEN_EXT_MCP_TOKEN_FILE;
+  const envToken = process.env.ZEN_MCP_TOKEN_FILE;
   if (envToken) tokenPath = envToken;
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];

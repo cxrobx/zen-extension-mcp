@@ -12,7 +12,7 @@ A URL's container was decided by *which MCP entry made the call*, not by the URL
 another duplicate tab next to the one already showing that site.
 
 - **Host → container route table** (`server/src/routes.ts`), loaded from
-  `~/.config/zen-extension-mcp/containers.json` (or `ZEN_EXT_MCP_ROUTES`). A rule matches its
+  `~/.config/zen-mcp/containers.json` (or `ZEN_MCP_ROUTES`). A rule matches its
   host and subdomains; `*.example.com` is subdomains-only; `localhost:3000` pins a port. Most
   specific match wins. Nothing personal ships in the repo — an absent file simply means no
   rules, while a malformed one reports its parse error instead of looking empty.
@@ -29,7 +29,7 @@ another duplicate tab next to the one already showing that site.
   elsewhere (a tab cannot change container). `list_pages` and `select_page` take a `container`
   filter — `list_pages` keeps positions and the `tabSet` fingerprint anchored to the full
   visible set. New `container_routes` tool (`url` to resolve one, `reload` after editing);
-  `get_firefox_info` gains `mcp.containerRoutes`. `ZEN_EXT_MCP_CONTAINER_ROUTES=0` disables.
+  `get_firefox_info` gains `mcp.containerRoutes`. `ZEN_MCP_CONTAINER_ROUTES=0` disables.
 - **Mid-load reuse.** A new tab reports `about:blank` until its navigation commits, so a second
   `open_url` moments later used to open a duplicate (found by the live probe, not the stub).
   The session now remembers what it asked each tab to load for 30s and counts that as the
@@ -76,7 +76,7 @@ repeatedly-confirmed knowledge never outranked a one-off.
   `consolidated`, `lastEtlAt`, `lastConsolidateAt` — making "is it learning?" one call.
   Meta fields are additive; no store schema bump.
 - **Probe hygiene.** Every probe that drives live Zen now runs with
-  `ZEN_EXT_MCP_NAV_MEMORY=0`, so probe traffic stops polluting the real store (16 of 40
+  `ZEN_MCP_NAV_MEMORY=0`, so probe traffic stops polluting the real store (16 of 40
   learned notes were `example.com` junk). `probe-navmem.mjs` keeps capture on by design.
 
 ## Unreleased (durable tab addressing — server only, no extension change)

@@ -1,4 +1,4 @@
-import { DEFAULT_DAEMON_HOST, DEFAULT_DAEMON_PORT } from "@zen-ext-mcp/shared";
+import { DEFAULT_DAEMON_HOST, DEFAULT_DAEMON_PORT } from "@zen-mcp/shared";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
@@ -12,16 +12,16 @@ export interface ServerOptions {
 function defaultTokenPath(): string {
   const xdg = process.env.XDG_CONFIG_HOME;
   const base = xdg && xdg.length > 0 ? xdg : join(homedir(), ".config");
-  return join(base, "zen-extension-mcp", "auth.token");
+  return join(base, "zen-mcp", "auth.token");
 }
 
 export function parseArgs(argv: string[]): ServerOptions {
-  let host = process.env.ZEN_EXT_MCP_HOST ?? DEFAULT_DAEMON_HOST;
-  let port = process.env.ZEN_EXT_MCP_PORT
-    ? Number.parseInt(process.env.ZEN_EXT_MCP_PORT, 10)
+  let host = process.env.ZEN_MCP_HOST ?? DEFAULT_DAEMON_HOST;
+  let port = process.env.ZEN_MCP_PORT
+    ? Number.parseInt(process.env.ZEN_MCP_PORT, 10)
     : DEFAULT_DAEMON_PORT;
-  let tokenPath = process.env.ZEN_EXT_MCP_TOKEN_FILE ?? defaultTokenPath();
-  let container: string | null = process.env.ZEN_EXT_MCP_CONTAINER ?? null;
+  let tokenPath = process.env.ZEN_MCP_TOKEN_FILE ?? defaultTokenPath();
+  let container: string | null = process.env.ZEN_MCP_CONTAINER ?? null;
 
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];

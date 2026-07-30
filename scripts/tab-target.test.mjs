@@ -205,7 +205,7 @@ before(async () => {
   server = spawn(
     "node",
     [resolve(root, "server/dist/index.js"), "--port", String(PORT), "--token-file", tokenPath],
-    { stdio: ["pipe", "pipe", "pipe"], env: { ...process.env, ZEN_EXT_MCP_NAV_MEMORY: "0" } },
+    { stdio: ["pipe", "pipe", "pipe"], env: { ...process.env, ZEN_MCP_NAV_MEMORY: "0" } },
   );
   server.stderr.resume();
   await sleep(400);

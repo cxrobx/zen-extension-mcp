@@ -1,5 +1,5 @@
-import type { NavNote } from "@zen-ext-mcp/shared";
-import { matchesPathGlob } from "@zen-ext-mcp/shared/nav-redact";
+import type { NavNote } from "@zen-mcp/shared";
+import { matchesPathGlob } from "@zen-mcp/shared/nav-redact";
 
 export interface RankContext {
   host: string;

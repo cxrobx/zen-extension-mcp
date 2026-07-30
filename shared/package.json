@@ -1,5 +1,5 @@
 {
-  "name": "@zen-ext-mcp/shared",
+  "name": "@zen-mcp/shared",
   "version": "0.0.1",
   "private": true,
   "main": "./dist/index.js",

@@ -52,7 +52,7 @@ import {
   type TakeSnapshotResult,
   type TypeByLocatorParams,
   type UidActionParams,
-} from "@zen-ext-mcp/shared";
+} from "@zen-mcp/shared";
 
 export type Handler = (params: unknown) => Promise<unknown>;
 

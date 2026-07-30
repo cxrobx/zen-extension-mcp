@@ -120,7 +120,7 @@ test("store permissions, ETL idempotency, and durable seed suppression", async (
       events: [{ ts: Date.now(), tool: "fill", host: "example.com", path: "/form", ok: true, locator: "css:input[name=email]" }],
     });
     await service.onSessionEnd("c1");
-    process.env.ZEN_EXT_MCP_NAV_ETL_PROBE = "1";
+    process.env.ZEN_MCP_NAV_ETL_PROBE = "1";
     const first = await service.handleRequest({ connId: "probe", containerScope: null }, "navMemory.etlNow", {});
     assert.equal(first.status, "processed");
     const learned = store.allNotes().find((note) => note.host === "example.com");
@@ -138,7 +138,7 @@ test("store permissions, ETL idempotency, and durable seed suppression", async (
     await service2.stop();
     assert.equal((await readFile(join(dir, "notes.json"), "utf8")).includes("secret@example.com"), false);
   } finally {
-    delete process.env.ZEN_EXT_MCP_NAV_ETL_PROBE;
+    delete process.env.ZEN_MCP_NAV_ETL_PROBE;
     await rm(dir, { recursive: true, force: true });
   }
 });
@@ -211,7 +211,7 @@ test("failed ETL reaches quarantine and decay uses elapsed time", async () => {
       events: [{ ts: clock.getTime(), tool: "click", host: "example.com", path: "/", ok: false, errorCode: "TIMEOUT" }],
     });
     await service.onSessionEnd("c");
-    process.env.ZEN_EXT_MCP_NAV_ETL_PROBE = "1";
+    process.env.ZEN_MCP_NAV_ETL_PROBE = "1";
     for (let i = 0; i < 3; i++) await service.handleRequest({ connId: "probe", containerScope: null }, "navMemory.etlNow", {});
     assert.equal((await store.counts()).failed, 1);
     const before = store.allNotes()[0].confidence;
@@ -220,7 +220,7 @@ test("failed ETL reaches quarantine and decay uses elapsed time", async () => {
     assert.ok(store.allNotes()[0].confidence < before);
     await service.stop();
   } finally {
-    delete process.env.ZEN_EXT_MCP_NAV_ETL_PROBE;
+    delete process.env.ZEN_MCP_NAV_ETL_PROBE;
     await rm(dir, { recursive: true, force: true });
   }
 });
@@ -255,7 +255,7 @@ test("distiller reinforcement merges into the referenced note and rejects bad in
     const store = new JsonNavStore(dir);
     const service = new NavMemoryService(store, distiller, offlineEmbedder(), () => clock);
     await service.init();
-    process.env.ZEN_EXT_MCP_NAV_ETL_PROBE = "1";
+    process.env.ZEN_MCP_NAV_ETL_PROBE = "1";
     const run = async (connId) => {
       await service.handleRequest({ connId, containerScope: null }, "navMemory.recordEvents", { events: [fixtureEvent(clock)] });
       await service.onSessionEnd(connId);
@@ -286,7 +286,7 @@ test("distiller reinforcement merges into the referenced note and rejects bad in
     assert.ok(store.getMeta().lastEtlAt);
     await service.stop();
   } finally {
-    delete process.env.ZEN_EXT_MCP_NAV_ETL_PROBE;
+    delete process.env.ZEN_MCP_NAV_ETL_PROBE;
     await rm(dir, { recursive: true, force: true });
   }
 });

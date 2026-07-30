@@ -57,7 +57,7 @@ class McpClient {
 }
 
 async function run(args, label) {
-  const proc = spawnLogged("mcp", "node", [resolve(root, "server/dist/index.js"), ...args], { env: { ...process.env, ZEN_EXT_MCP_NAV_MEMORY: "0" } });
+  const proc = spawnLogged("mcp", "node", [resolve(root, "server/dist/index.js"), ...args], { env: { ...process.env, ZEN_MCP_NAV_MEMORY: "0" } });
   await sleep(400);
   const mcp = new McpClient(proc);
   await mcp.send("initialize", {

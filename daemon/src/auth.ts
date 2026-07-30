@@ -8,7 +8,7 @@ const TOKEN_BYTES = 32;
 export function defaultAuthPath(): string {
   const xdg = process.env.XDG_CONFIG_HOME;
   const base = xdg && xdg.length > 0 ? xdg : join(homedir(), ".config");
-  return join(base, "zen-extension-mcp", "auth.token");
+  return join(base, "zen-mcp", "auth.token");
 }
 
 export function loadOrCreateToken(path: string = defaultAuthPath()): string {

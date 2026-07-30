@@ -10,7 +10,7 @@ Nav memory preserves low-sensitivity navigation knowledge learned while the Zen 
 - The persistent daemon owns the atomic JSON store, exact/related-host ranking, per-host raw work files, Claude distillation, optional Ollama embeddings, deduplication, decay, stats, and deletion.
 - The extension and protocol version are unchanged. `navMemory.*` requests use the existing authenticated request/response transport and never reach the extension.
 
-State lives under `~/.config/zen-extension-mcp/nav-memory/` by default. Directories use mode `0700`; notes and raw work use `0600`. Pending, failed, and consumed (`sessions/done/`) telemetry expires after 30 days and is also count-capped (200 / 50 / 300 files).
+State lives under `~/.config/zen-mcp/nav-memory/` by default. Directories use mode `0700`; notes and raw work use `0600`. Pending, failed, and consumed (`sessions/done/`) telemetry expires after 30 days and is also count-capped (200 / 50 / 300 files).
 
 ## Session durability
 
@@ -53,9 +53,9 @@ The two mechanisms are complementary, not redundant: the sweep cannot rephrase, 
 - `nav_memory_forget`: delete a note or exact host, including raw work by default.
 
 Consumed work files are archived to `sessions/done/` instead of being deleted. They are already redacted, and they are the only durable record of which tools ran against which hosts — a usage history that survives daemon restarts, capped at 300 files and 30 days. `nav_memory_forget` with a host purges matching archived files too.
-- `ZEN_EXT_MCP_NAV_MEMORY=0`: disable capture and automatic injection in one MCP server.
-- `--nav-db` / `ZEN_EXT_MCP_NAV_DB`: override state location.
-- `--claude-bin` / `ZEN_EXT_MCP_CLAUDE_BIN`: override the distiller executable.
+- `ZEN_MCP_NAV_MEMORY=0`: disable capture and automatic injection in one MCP server.
+- `--nav-db` / `ZEN_MCP_NAV_DB`: override state location.
+- `--claude-bin` / `ZEN_MCP_CLAUDE_BIN`: override the distiller executable.
 
 Export by copying `notes.json`. Import only while the daemon is stopped, restore mode `0600`, then restart so startup validation and seed application run.
 

@@ -32,8 +32,8 @@ import {
   type StorageGetResult,
   type StorageSetResult,
   type TakeSnapshotResult,
-} from "@zen-ext-mcp/shared";
-import { normalizeHost, normalizeUrl } from "@zen-ext-mcp/shared/nav-redact";
+} from "@zen-mcp/shared";
+import { normalizeHost, normalizeUrl } from "@zen-mcp/shared/nav-redact";
 import { type DaemonClient, RpcError } from "./daemon-client.js";
 import {
   formatAvailableContainers,

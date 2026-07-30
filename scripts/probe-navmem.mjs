@@ -129,7 +129,7 @@ async function main() {
   let mock;
   try {
     daemon = child("daemon", "node", [resolve(root, "daemon/dist/index.js"), "--port", String(port), "--token-file", tokenPath, "--nav-db", navDir, "--claude-bin", resolve(here, "fake-claude.mjs")], {
-      env: { ...process.env, ZEN_EXT_MCP_NAV_ETL_PROBE: "1", ZEN_EXT_MCP_OLLAMA_URL: `http://127.0.0.1:${ollamaPort}` },
+      env: { ...process.env, ZEN_MCP_NAV_ETL_PROBE: "1", ZEN_MCP_OLLAMA_URL: `http://127.0.0.1:${ollamaPort}` },
     });
     await new Promise((resolveP) => setTimeout(resolveP, 350));
     const token = (await readFile(tokenPath, "utf8")).trim();
@@ -143,7 +143,7 @@ async function main() {
     if (!isolated.includes("no nav notes")) throw new Error("M0 private suffix isolation failed");
 
     mock = child("mock", "node", [resolve(here, "mock-extension.mjs")], {
-      env: { ...process.env, ZEN_EXT_MCP_URL: `ws://127.0.0.1:${port}`, ZEN_EXT_MCP_TOKEN_FILE: tokenPath },
+      env: { ...process.env, ZEN_MCP_URL: `ws://127.0.0.1:${port}`, ZEN_MCP_TOKEN_FILE: tokenPath },
     });
     await new Promise((resolveP) => setTimeout(resolveP, 250));
     const first = text(await tool(mcp, "navigate_page", { pageIdx: 0, url: "https://console.cloud.google.com/auth/clients/test" }));

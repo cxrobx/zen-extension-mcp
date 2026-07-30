@@ -81,7 +81,7 @@ function check(cond, msg) {
 }
 
 async function main() {
-  const server = spawnLogged("mcp", "node", [resolve(root, "server/dist/index.js"), "--port", "8766"], { env: { ...process.env, ZEN_EXT_MCP_NAV_MEMORY: "0" } });
+  const server = spawnLogged("mcp", "node", [resolve(root, "server/dist/index.js"), "--port", "8766"], { env: { ...process.env, ZEN_MCP_NAV_MEMORY: "0" } });
   await sleep(400);
   const mcp = new McpClient(server);
   await mcp.send("initialize", { protocolVersion: "2024-11-05", capabilities: {}, clientInfo: { name: "probe-focus", version: "0.0.1" } });

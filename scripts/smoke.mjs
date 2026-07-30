@@ -10,7 +10,7 @@ const here = dirname(fileURLToPath(import.meta.url));
 const root = resolve(here, "..");
 const TEST_PORT = "18766";
 // Without an explicit --nav-db the daemon opens the real store in
-// ~/.config/zen-extension-mcp/nav-memory, so a smoke run would write notes
+// ~/.config/zen-mcp/nav-memory, so a smoke run would write notes
 // alongside the live daemon already writing that same file.
 const scratch = mkdtempSync(join(tmpdir(), "zen-smoke-"));
 
@@ -67,7 +67,7 @@ async function main() {
     resolve(root, "server/dist/index.js"),
     "--port",
     TEST_PORT,
-  ], { env: { ...process.env, ZEN_EXT_MCP_NAV_MEMORY: "0" } });
+  ], { env: { ...process.env, ZEN_MCP_NAV_MEMORY: "0" } });
   await sleep(500);
 
   const initialize = {
@@ -96,7 +96,7 @@ async function main() {
   );
   await sleep(500);
   const mock = spawnLogged("mock-ext", "node", [resolve(here, "mock-extension.mjs")], {
-    env: { ...process.env, ZEN_EXT_MCP_URL: `ws://127.0.0.1:${TEST_PORT}` },
+    env: { ...process.env, ZEN_MCP_URL: `ws://127.0.0.1:${TEST_PORT}` },
   });
   const callResp = await expectPipeJson(server, (m) => m.id === 2, 5000);
 

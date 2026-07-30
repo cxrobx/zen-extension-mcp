@@ -8,7 +8,7 @@ import {
   type RequestMessage,
   type ResponseMessage,
   type WireMessage,
-} from "@zen-ext-mcp/shared";
+} from "@zen-mcp/shared";
 
 const HELLO_TIMEOUT_MS = 5_000;
 const REQUEST_TIMEOUT_MS = 30_000;

@@ -4,10 +4,10 @@ import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
-const url = process.env.ZEN_EXT_MCP_URL ?? "ws://127.0.0.1:8766";
+const url = process.env.ZEN_MCP_URL ?? "ws://127.0.0.1:8766";
 const tokenPath =
-  process.env.ZEN_EXT_MCP_TOKEN_FILE ??
-  join(process.env.XDG_CONFIG_HOME ?? join(homedir(), ".config"), "zen-extension-mcp", "auth.token");
+  process.env.ZEN_MCP_TOKEN_FILE ??
+  join(process.env.XDG_CONFIG_HOME ?? join(homedir(), ".config"), "zen-mcp", "auth.token");
 const token = readFileSync(tokenPath, "utf8").trim();
 
 const FIXTURE_CONTAINERS = [

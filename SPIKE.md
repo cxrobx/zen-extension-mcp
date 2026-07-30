@@ -5,7 +5,7 @@ Status: passing.
 ## What this spike proved
 
 1. **Three-process architecture works end-to-end.** Daemon owns the WebSocket port; MCP server connects as a client; the extension connects in the same role on the other side. Requests fan out from N MCP-server clients to the single extension; responses route back to the originating client.
-2. **Auth handshake works.** Daemon auto-generates a 32-byte token on first launch (`~/.config/zen-extension-mcp/auth.token`, mode 0600) and rejects connections that present a wrong or missing token within a 5s `hello` window. Constant-time compared via `crypto.timingSafeEqual`.
+2. **Auth handshake works.** Daemon auto-generates a 32-byte token on first launch (`~/.config/zen-mcp/auth.token`, mode 0600) and rejects connections that present a wrong or missing token within a 5s `hello` window. Constant-time compared via `crypto.timingSafeEqual`.
 3. **Heartbeat works.** Daemon sends WebSocket pings every 30s; on missing pong the next tick terminates the connection. Server and extension both auto-reconnect with exponential backoff (500ms -> 10s).
 4. **`--container <name>` resolves at server startup** using the same `resolveContainerByName` logic ported verbatim from `zen-mcp/src/firefox/container.ts`. Valid names succeed; invalid names refuse startup with the existing fork's error format (lists all available containers).
 5. **Single MCP tool reaches the extension.** `list_containers` round-trips through the bridge and returns a formatted list.

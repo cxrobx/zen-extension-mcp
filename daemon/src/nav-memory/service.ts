@@ -14,7 +14,7 @@ import {
   type NavNote,
   type NavNoteSummary,
   type NavSessionLog,
-} from "@zen-ext-mcp/shared";
+} from "@zen-mcp/shared";
 import {
   containsPromptLikeText,
   normalizeHost,
@@ -25,7 +25,7 @@ import {
   sanitizeLocator,
   truncateUtf8,
   validPathGlob,
-} from "@zen-ext-mcp/shared/nav-redact";
+} from "@zen-mcp/shared/nav-redact";
 import { log } from "../log.js";
 import { type DistilledNote, type Distiller, MAX_KNOWN_NOTES } from "./distill.js";
 import { encodeEmbedding, type Embedder, MERGE_SIMILARITY, nearestNote, dot, decodeEmbedding } from "./embeddings.js";
@@ -110,7 +110,7 @@ export class NavMemoryService {
       case Methods.NavMemoryForget:
         return this.forget(raw);
       case Methods.NavMemoryEtlNow:
-        if (process.env.ZEN_EXT_MCP_NAV_ETL_PROBE !== "1") throw new NavServiceError(-32601, "method not found");
+        if (process.env.ZEN_MCP_NAV_ETL_PROBE !== "1") throw new NavServiceError(-32601, "method not found");
         return this.serializedWork(() => this.processOne());
       default:
         throw new NavServiceError(-32601, `unknown nav-memory method: ${method}`);

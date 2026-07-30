@@ -2,7 +2,7 @@ import { spawn } from "node:child_process";
 import { mkdtemp, rm } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
-import type { NavNoteKind, NavNoteSummary, NavSessionLog } from "@zen-ext-mcp/shared";
+import type { NavNoteKind, NavNoteSummary, NavSessionLog } from "@zen-mcp/shared";
 
 export const MAX_KNOWN_NOTES = 20;
 
@@ -75,7 +75,7 @@ ${JSON.stringify({ ...session, container: null })}`;
 }
 
 export class ClaudeDistiller implements Distiller {
-  constructor(private readonly binary = process.env.ZEN_EXT_MCP_CLAUDE_BIN ?? "claude") {}
+  constructor(private readonly binary = process.env.ZEN_MCP_CLAUDE_BIN ?? "claude") {}
 
   async distill(session: NavSessionLog, existing: NavNoteSummary[] = []): Promise<DistilledNote[]> {
     const workDir = await mkdtemp(join(tmpdir(), "zen-nav-distill-"));

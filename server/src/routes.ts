@@ -24,7 +24,7 @@ export interface RouteTable {
   path: string;
   /** The file existed and parsed. */
   loaded: boolean;
-  /** Routing is switched on (ZEN_EXT_MCP_CONTAINER_ROUTES=0 turns it off). */
+  /** Routing is switched on (ZEN_MCP_CONTAINER_ROUTES=0 turns it off). */
   enabled: boolean;
   rules: CompiledRule[];
   /** Load or parse failure, kept so the state is reportable instead of silently empty. */
@@ -51,15 +51,15 @@ const MAX_PATTERN_LEN = 253;
 let cached: RouteTable | null = null;
 
 export function routeConfigPath(): string {
-  const override = process.env.ZEN_EXT_MCP_ROUTES;
+  const override = process.env.ZEN_MCP_ROUTES;
   if (override && override.length > 0) return override;
   const xdg = process.env.XDG_CONFIG_HOME;
   const base = xdg && xdg.length > 0 ? xdg : join(homedir(), ".config");
-  return join(base, "zen-extension-mcp", "containers.json");
+  return join(base, "zen-mcp", "containers.json");
 }
 
 function routingEnabled(): boolean {
-  return process.env.ZEN_EXT_MCP_CONTAINER_ROUTES !== "0";
+  return process.env.ZEN_MCP_CONTAINER_ROUTES !== "0";
 }
 
 /** Loaded once per process; call reloadRouteTable() to pick up an edited file. */
@@ -253,7 +253,7 @@ export function matchContainerRoute(table: RouteTable, url: string): RouteMatch 
 
 /** One-line state summary for get_firefox_info. */
 export function routeSummaryLine(table: RouteTable): string {
-  if (!table.enabled) return "disabled (ZEN_EXT_MCP_CONTAINER_ROUTES=0)";
+  if (!table.enabled) return "disabled (ZEN_MCP_CONTAINER_ROUTES=0)";
   if (table.error) return `error: ${table.error}`;
   if (!table.loaded) return `(no route file at ${table.path})`;
   return `${table.rules.length} rule${table.rules.length === 1 ? "" : "s"} from ${table.path}`;

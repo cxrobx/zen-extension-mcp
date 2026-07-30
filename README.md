@@ -1,4 +1,4 @@
-# zen-extension-mcp
+# zen-mcp
 
 WebExtension-backed MCP for Zen / Firefox. Sister project to `zen-mcp` (a local fork of [`firefox-devtools-mcp`](https://github.com/mozilla/firefox-devtools-mcp)), which uses Marionette/Selenium and requires launching the browser with flags. This one lives as a permanently-installed signed extension in your daily Zen — no flags, no restarts, container scoping per MCP entry.
 
@@ -56,7 +56,7 @@ Optional guard for `pageIdx` callers: pass `expectTabSet` with the fingerprint f
 
 Without a route table, a URL's container is decided by *which MCP entry issued the call* — so the same site lands in a different cookie jar depending on whether it was `zen-ext` or `zen-cxv`, and every call opens another duplicate tab. A **host → container table** makes the domain decide instead.
 
-The table is a user config file, absent by default, read from `$XDG_CONFIG_HOME/zen-extension-mcp/containers.json` (falling back to `~/.config/...`), or from `ZEN_EXT_MCP_ROUTES`:
+The table is a user config file, absent by default, read from `$XDG_CONFIG_HOME/zen-mcp/containers.json` (falling back to `~/.config/...`), or from `ZEN_MCP_ROUTES`:
 
 ```json
 {
@@ -74,14 +74,14 @@ Precedence, highest first: **explicit argument** (`new_page_in_container`, `open
 
 ```
 new page tabId=1226 -> https://artistadvisory.io/artists (Artist Advisory)
-container: Artist Advisory (firefox-container-8) via route "artistadvisory.io" in ~/.config/zen-extension-mcp/containers.json
+container: Artist Advisory (firefox-container-8) via route "artistadvisory.io" in ~/.config/zen-mcp/containers.json
 ```
 
 `open_url` is the tool that uses this end to end: it resolves the container, then **goes to the tab already open on that host in that container** — focusing it if it is already at that URL, otherwise navigating it — and opens a new tab only when there is none. Reuse is `reuse: "host"` by default; `"exact"` reuses only a tab already at that URL, `"never"` always opens. Like `new_page`, it stays in the background unless `active: true`.
 
 Two limits worth knowing. Reuse only sees the **active Zen workspace**, so a matching tab in another workspace is invisible and a new tab is opened. And a tab **cannot change container** — `navigate_page` therefore says so when the URL you are loading is mapped elsewhere, rather than pretending it fixed it.
 
-Failure modes are loud on purpose: a rule naming a container that does not exist **errors and opens nothing**, because a silent fallback is how a login ends up in the wrong jar. A missing file is simply "no rules"; a malformed one reports the parse error instead of looking empty. Inspect the live state with `container_routes` (add `url` to see how one URL resolves, `reload: true` after editing the file) or the `mcp.containerRoutes` line in `get_firefox_info`. Set `ZEN_EXT_MCP_CONTAINER_ROUTES=0` to switch routing off for an entry.
+Failure modes are loud on purpose: a rule naming a container that does not exist **errors and opens nothing**, because a silent fallback is how a login ends up in the wrong jar. A missing file is simply "no rules"; a malformed one reports the parse error instead of looking empty. Inspect the live state with `container_routes` (add `url` to see how one URL resolves, `reload: true` after editing the file) or the `mcp.containerRoutes` line in `get_firefox_info`. Set `ZEN_MCP_CONTAINER_ROUTES=0` to switch routing off for an entry.
 
 Dropped from `zen-mcp` because no WebExtension equivalent: `list_privileged_contexts` / `select_privileged_context` / `evaluate_privileged_script`, `set_firefox_prefs` / `get_firefox_prefs`, `restart_firefox`, `upload_file_by_uid`, `install_extension` / `list_extensions` / `uninstall_extension`.
 
@@ -106,8 +106,8 @@ Focus behavior: automation is non-disruptive by default. `new_page` / `new_page_
 ## Build
 
 ```sh
-git clone https://github.com/cxrobx/zen-extension-mcp.git
-cd zen-extension-mcp
+git clone https://github.com/cxrobx/zen-mcp.git
+cd zen-mcp
 npm install
 npm run build
 ```
@@ -156,7 +156,7 @@ This is required for `screenshot_page` (`tabs.captureTab` needs host access to t
 Find the auth token:
 
 ```sh
-cat ~/.config/zen-extension-mcp/auth.token
+cat ~/.config/zen-mcp/auth.token
 ```
 
 In Zen, open the extension's Preferences page (via `about:addons`'s `⋯` menu, or the toolbar puzzle-piece icon — varies by Zen UI version). Paste:
@@ -174,26 +174,26 @@ Click Save. The pill should flip to `authenticated` within 1-2 seconds (it can t
 node daemon/dist/index.js --port 8766
 ```
 
-The daemon writes a 32-byte random token to `~/.config/zen-extension-mcp/auth.token` on first launch (mode 0600). All later launches reuse it.
+The daemon writes a 32-byte random token to `~/.config/zen-mcp/auth.token` on first launch (mode 0600). All later launches reuse it.
 
 Default port is 8766. If you collide, use `--port <free-port>` and update the extension's options page URL to match.
 
-Navigation memory defaults to `~/.config/zen-extension-mcp/nav-memory/`. Override it with `--nav-db <dir>` or `ZEN_EXT_MCP_NAV_DB`; override the distiller executable with `--claude-bin <path>` or `ZEN_EXT_MCP_CLAUDE_BIN`. Set `ZEN_EXT_MCP_NAV_MEMORY=0` on an MCP server process to disable new capture and automatic note injection while retaining the explicit playbook tools.
+Navigation memory defaults to `~/.config/zen-mcp/nav-memory/`. Override it with `--nav-db <dir>` or `ZEN_MCP_NAV_DB`; override the distiller executable with `--claude-bin <path>` or `ZEN_MCP_CLAUDE_BIN`. Set `ZEN_MCP_NAV_MEMORY=0` on an MCP server process to disable new capture and automatic note injection while retaining the explicit playbook tools.
 
 A simple launchd plist for keeping the daemon running:
 
 ```xml
-<!-- ~/Library/LaunchAgents/io.cxrobx.zen-extension-mcp.daemon.plist -->
+<!-- ~/Library/LaunchAgents/io.cxrobx.zen-mcp.daemon.plist -->
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
   <key>Label</key>
-  <string>io.cxrobx.zen-extension-mcp.daemon</string>
+  <string>io.cxrobx.zen-mcp.daemon</string>
   <key>ProgramArguments</key>
   <array>
     <string>/usr/local/bin/node</string>
-    <string>/Users/YOU/Projects/zen-extension-mcp/daemon/dist/index.js</string>
+    <string>/Users/YOU/Projects/zen-mcp/daemon/dist/index.js</string>
     <string>--port</string>
     <string>8766</string>
   </array>
@@ -203,7 +203,7 @@ A simple launchd plist for keeping the daemon running:
 </plist>
 ```
 
-Load it: `launchctl load ~/Library/LaunchAgents/io.cxrobx.zen-extension-mcp.daemon.plist`.
+Load it: `launchctl load ~/Library/LaunchAgents/io.cxrobx.zen-mcp.daemon.plist`.
 
 ### Register MCP servers in Claude Code
 
@@ -212,7 +212,7 @@ Each entry is short-lived (one per Claude Code session) and connects to the daem
 **Single, no scoping**:
 
 ```sh
-claude mcp add zen-ext node /abs/path/to/zen-extension-mcp/server/dist/index.js -- --port 8766
+claude mcp add zen-ext node /abs/path/to/zen-mcp/server/dist/index.js -- --port 8766
 ```
 
 **Container-scoped** (one per container — they all share the daemon and extension):
@@ -237,7 +237,7 @@ Two MCP entries calling `new_page` simultaneously each open their own tab in the
 
 ### Auth + heartbeat
 
-- **Token**: shared secret, 32 bytes random hex, stored at `~/.config/zen-extension-mcp/auth.token` (0600). First message on every connection must be a `hello` with the token within 5s. Constant-time compared via `crypto.timingSafeEqual`.
+- **Token**: shared secret, 32 bytes random hex, stored at `~/.config/zen-mcp/auth.token` (0600). First message on every connection must be a `hello` with the token within 5s. Constant-time compared via `crypto.timingSafeEqual`.
 - **Heartbeat**: daemon sends WebSocket pings every 30s. If no pong, the connection is terminated and (for clients) eligible for replacement.
 - **Reconnect**: clients (server + extension) reconnect with exponential backoff capped at 10s. Resets to 0 on `welcome`.
 
@@ -304,7 +304,7 @@ When iterating on extension code with the signed install in production: rebuild 
 
 **Port collision**: `--port 8766` (or any other free port) on the daemon, then update the extension's options URL.
 
-**Token rotation**: `rm ~/.config/zen-extension-mcp/auth.token` and restart the daemon. Paste the new value into the options page.
+**Token rotation**: `rm ~/.config/zen-mcp/auth.token` and restart the daemon. Paste the new value into the options page.
 
 ## Security model
 

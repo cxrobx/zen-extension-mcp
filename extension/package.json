@@ -1,5 +1,5 @@
 {
-  "name": "@zen-ext-mcp/extension",
+  "name": "@zen-mcp/extension",
   "version": "0.0.1",
   "private": true,
   "scripts": {
@@ -11,7 +11,7 @@
   },
   "dependencies": {
     "@babel/standalone": "^7.28.5",
-    "@zen-ext-mcp/shared": "*",
+    "@zen-mcp/shared": "*",
     "eval5": "^1.4.8"
   },
   "devDependencies": {

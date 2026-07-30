@@ -1,5 +1,5 @@
 {
-  "name": "@zen-ext-mcp/server",
+  "name": "@zen-mcp/server",
   "version": "0.0.4",
   "private": true,
   "type": "module",
@@ -14,7 +14,7 @@
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "1.29.0",
-    "@zen-ext-mcp/shared": "*",
+    "@zen-mcp/shared": "*",
     "ws": "^8.18.0",
     "zod": "^3.23.8"
   },

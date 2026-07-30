@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
-import type { NavNote, NavNoteKind } from "@zen-ext-mcp/shared";
-import { registrableDomain } from "@zen-ext-mcp/shared/nav-redact";
+import type { NavNote, NavNoteKind } from "@zen-mcp/shared";
+import { registrableDomain } from "@zen-mcp/shared/nav-redact";
 import type { JsonNavStore } from "./store.js";
 
 export const SEED_VERSION = 1;

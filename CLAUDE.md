@@ -1,4 +1,4 @@
-# zen-extension-mcp — agent guide
+# zen-mcp — agent guide
 
 WebExtension-backed MCP for Zen (Firefox). Sister project to `~/Projects/zen-mcp` (Marionette/Selenium). User docs in `README.md`; this file is for an agent working on the codebase.
 
@@ -29,10 +29,10 @@ Claude Code  --stdio-->  MCP server (per session, --container-scoped)
 
 ## Daily-driver state (already set up)
 
-- Daemon: launchd `~/Library/LaunchAgents/io.cxrobx.zen-extension-mcp.daemon.plist` → `/usr/local/bin/node` runs `daemon/dist/index.js --port 8766`. Logs at `~/Library/Logs/zen-extension-mcp/daemon.{out,err}.log`.
+- Daemon: launchd `~/Library/LaunchAgents/io.cxrobx.zen-mcp.daemon.plist` → `/usr/local/bin/node` runs `daemon/dist/index.js --port 8766`. Logs at `~/Library/Logs/zen-mcp/daemon.{out,err}.log`.
 - Extension: signed via AMO unlisted, gecko id `zen-ext-mcp@cxrobx`, currently 0.0.15. Settings (URL + token) live in `browser.storage.local`; snapshot UID maps live in `browser.storage.session`.
-- Auth token: `~/.config/zen-extension-mcp/auth.token` (mode 0600, 32-byte hex). Daemon generates on first launch.
-- AMO signing creds: `~/.config/zen-extension-mcp/.env` (mode 0600, `AMO_KEY` + `AMO_SECRET`). Sourced by `extension/scripts/sign.sh`; `npm run extension:sign` works with no inline env. Get fresh keys at https://addons.mozilla.org/developers/addon/api/key/.
+- Auth token: `~/.config/zen-mcp/auth.token` (mode 0600, 32-byte hex). Daemon generates on first launch.
+- AMO signing creds: `~/.config/zen-mcp/.env` (mode 0600, `AMO_KEY` + `AMO_SECRET`). Sourced by `extension/scripts/sign.sh`; `npm run extension:sign` works with no inline env. Get fresh keys at https://addons.mozilla.org/developers/addon/api/key/.
 - 7 MCP entries at user scope (`~/.claude.json`): `zen-ext`, `zen-cxv`, `zen-personal`, `zen-geek`, `zen-music`, `zen-buildersbuddy`, `zen-artist`.
 
 ## Iteration loop (it's slow — minimize cycles)
@@ -46,13 +46,13 @@ For extension changes:
    ```
    Pick `max + 0.0.1` and write that into `extension/src/manifest.json`. AMO rejects re-uploads of any previously-signed version, even ones that were deleted locally — the manifest in the repo can lag behind AMO.
 3. `npm run build:extension`
-4. `npm run extension:sign` — uploads to AMO; signing takes 30-90s. Creds come from `~/.config/zen-extension-mcp/.env`; override inline with `AMO_KEY=... AMO_SECRET=... npm run extension:sign` if needed.
+4. `npm run extension:sign` — uploads to AMO; signing takes 30-90s. Creds come from `~/.config/zen-mcp/.env`; override inline with `AMO_KEY=... AMO_SECRET=... npm run extension:sign` if needed.
 5. **Open the signed XPI in Zen.** Almost always:
    ```sh
    open -a "/Applications/Zen.app" extension/web-ext-artifacts/<file>.xpi
    ```
    This shows the install banner at the top of the active tab. Click Allow → Add/Update. This is what works in practice.
-6. Confirm the new version in `about:addons` — **in-place upgrades occasionally no-op silently**, especially across larger version jumps. If the version didn't change: `⋯ → Remove` the old version, then re-run the `open -a` command. **Removal wipes `browser.storage.local`**; user has to re-paste daemon URL + token (`cat ~/.config/zen-extension-mcp/auth.token`) and re-toggle "Access your data for all websites" in the Permissions tab.
+6. Confirm the new version in `about:addons` — **in-place upgrades occasionally no-op silently**, especially across larger version jumps. If the version didn't change: `⋯ → Remove` the old version, then re-run the `open -a` command. **Removal wipes `browser.storage.local`**; user has to re-paste daemon URL + token (`cat ~/.config/zen-mcp/auth.token`) and re-toggle "Access your data for all websites" in the Permissions tab.
 7. **Fallback if `open -a` itself silently fails** (rare): serve the XPI over localhost with the right MIME and navigate Zen to it.
    ```sh
    cd extension/web-ext-artifacts && \
@@ -69,7 +69,7 @@ For dev iteration **without** AMO signing: `npm run extension:run` opens a fresh
 
 ## Don't talk yourself out of the easy path
 
-The AMO signing pipeline is fully wired up and runnable from the CLI. If you find yourself drafting a paragraph for the user about "AMO signing needs API credentials that only you can create" — stop. The credentials already exist at `~/.config/zen-extension-mcp/.env`, `extension/scripts/sign.sh` sources them, and `npm run extension:sign` just works. The previous session burned ~10 minutes lecturing the user before the user told it to actually look. Run the command first; lecture later only if it fails.
+The AMO signing pipeline is fully wired up and runnable from the CLI. If you find yourself drafting a paragraph for the user about "AMO signing needs API credentials that only you can create" — stop. The credentials already exist at `~/.config/zen-mcp/.env`, `extension/scripts/sign.sh` sources them, and `npm run extension:sign` just works. The previous session burned ~10 minutes lecturing the user before the user told it to actually look. Run the command first; lecture later only if it fails.
 
 For installation specifically: `open -a "/Applications/Zen.app" <xpi>` triggers the Zen install banner reliably across versions, ports, and fresh-install vs upgrade. Try that first. Only fall back to the localhost-MIME server flow if `open -a` produces nothing — and remember that "nothing" often means the upgrade silently no-op'd, not that `open` failed; check `about:addons` for the active version before changing approach.
 
@@ -113,7 +113,7 @@ After any extension change, run the relevant probe(s) — `npm run build` doesn'
 - **Nav-memory raw data stays structural.** Never add generic text hints, fill/type/select values, find queries, page content, evaluated code, cookie/storage values, or arbitrary error messages to `NavEventRecord`.
 - **Two mechanisms produce `reinforced`, and neither covers the other.** The distiller sees the host's top-20 notes as a numbered `KNOWN NOTES` list and answers `reinforces: <n>` (positional integers only — ids would be spoofable, and only `1..len` is honored); the hourly `consolidate()` sweep merges same-host pairs at cosine ≥ `MERGE_SIMILARITY` (0.86, `embeddings.ts`). The sweep can't rephrase and the distiller can't see across hosts or sessions — **deleting one because "the other handles it" silently stops a whole class of duplicate from merging**, which is exactly the state this feature was built to fix (46 notes, all stuck at `reinforced: 1`).
 - **`sessions/done/` is telemetry, not garbage.** `completeWork` archives consumed work there instead of `rm`-ing it; it's the only durable record of which tools ran against which hosts, already redacted, capped at 300 files / 30 days. Don't "clean it up" back into a delete.
-- **Probe scripts that drive live Zen must set `ZEN_EXT_MCP_NAV_MEMORY=0`.** Without it, probe traffic (`example.com`, localhost fixtures) is captured and distilled into the real store — that's where the 16 junk notes came from. `probe-navmem.mjs` is the deliberate exception: it tests capture, against a scratch daemon.
+- **Probe scripts that drive live Zen must set `ZEN_MCP_NAV_MEMORY=0`.** Without it, probe traffic (`example.com`, localhost fixtures) is captured and distilled into the real store — that's where the 16 junk notes came from. `probe-navmem.mjs` is the deliberate exception: it tests capture, against a scratch daemon.
 - **In-place extension upgrades occasionally no-op silently.** Always confirm the new version in `about:addons` after install. If stuck, remove the existing extension (`⋯ → Remove`) and re-run `open -a "/Applications/Zen.app" <xpi>`; that's reliable for a clean install. The localhost-XPI-server flow (step 7 of the iteration loop) is a deeper fallback if even `open -a` produces nothing.
 
 ## Where things live
@@ -128,7 +128,7 @@ After any extension change, run the relevant probe(s) — `npm run build` doesn'
 | MCP tool registrations | `server/src/tools.ts` |
 | Locator-prefix parser (`css:`/`xpath:`/`text:`/`text*:`/`role:`) | `server/src/locator.ts` |
 | Container resolver (ported from `zen-mcp`) | `server/src/container.ts` |
-| Host→container route table (load, match, describe) | `server/src/routes.ts` · config `~/.config/zen-extension-mcp/containers.json` |
+| Host→container route table (load, match, describe) | `server/src/routes.ts` · config `~/.config/zen-mcp/containers.json` |
 | Daemon WS client (used by MCP server) | `server/src/daemon-client.ts` |
 | Extension RPC handlers (pages.*, dom.*, cookies, storage, etc.) | `extension/src/handlers.ts` |
 | Extension WS client + reconnect/heartbeat | `extension/src/connection.ts` |

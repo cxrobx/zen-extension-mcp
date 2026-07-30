@@ -1,4 +1,4 @@
-import type { NavNote } from "@zen-ext-mcp/shared";
+import type { NavNote } from "@zen-mcp/shared";
 
 // Cosine floor for treating two same-host notes as the same fact. Measured on
 // the live store: real duplicate pairs cluster 0.864-0.888 while distinct facts
@@ -54,8 +54,8 @@ export class OllamaEmbedder implements Embedder {
   private checkedAt = 0;
 
   constructor(
-    private readonly baseUrl = process.env.ZEN_EXT_MCP_OLLAMA_URL ?? "http://127.0.0.1:11434",
-    model = process.env.ZEN_EXT_MCP_OLLAMA_MODEL ?? "nomic-embed-text",
+    private readonly baseUrl = process.env.ZEN_MCP_OLLAMA_URL ?? "http://127.0.0.1:11434",
+    model = process.env.ZEN_MCP_OLLAMA_MODEL ?? "nomic-embed-text",
     dimension = 768,
   ) {
     this.model = model;

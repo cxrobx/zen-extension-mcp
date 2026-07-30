@@ -63,7 +63,7 @@ async function main(): Promise<void> {
   }
 
   const server = new McpServer({ name: SERVER_NAME, version: SERVER_VERSION });
-  const nav = new NavContext(daemon, process.env.ZEN_EXT_MCP_NAV_MEMORY !== "0");
+  const nav = new NavContext(daemon, process.env.ZEN_MCP_NAV_MEMORY !== "0");
   registerTools(server, daemon, scope, {
     name: SERVER_NAME,
     version: SERVER_VERSION,
