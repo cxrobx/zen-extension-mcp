@@ -4,6 +4,41 @@ All notable changes to this project will be documented here. Versions track the
 extension manifest and the AMO-signed XPI artifacts. Server, daemon, and shared
 package versions move together with the extension.
 
+## Unreleased (container routing — server only, no extension change)
+
+A URL's container was decided by *which MCP entry made the call*, not by the URL. So
+`artistadvisory.io` opened in no container from `zen-ext` and in `Personal` from
+`zen-personal`, splitting one project's session across cookie jars, and every call opened
+another duplicate tab next to the one already showing that site.
+
+- **Host → container route table** (`server/src/routes.ts`), loaded from
+  `~/.config/zen-extension-mcp/containers.json` (or `ZEN_EXT_MCP_ROUTES`). A rule matches its
+  host and subdomains; `*.example.com` is subdomains-only; `localhost:3000` pins a port. Most
+  specific match wins. Nothing personal ships in the repo — an absent file simply means no
+  rules, while a malformed one reports its parse error instead of looking empty.
+- **`open_url`** resolves the owning container, then goes to the tab already open on that host
+  *in that container* — focusing it when it is already at that URL, otherwise navigating it —
+  and opens a new tab only when there is none. `reuse: "host" | "exact" | "never"`, background
+  unless `active: true`. Reuse never crosses a container boundary, and only sees the active Zen
+  workspace.
+- **Precedence, printed on every call:** explicit argument → host rule → session default
+  (`--container` / `set_default_container`) → none. A route naming a container that does not
+  exist **errors and opens nothing**; a silent fallback is how a login lands in the wrong jar.
+- `new_page` follows the table too; `new_page_in_container` still wins but names the rule it
+  overrode; `navigate_page` reports when it is loading a URL into a container that a rule maps
+  elsewhere (a tab cannot change container). `list_pages` and `select_page` take a `container`
+  filter — `list_pages` keeps positions and the `tabSet` fingerprint anchored to the full
+  visible set. New `container_routes` tool (`url` to resolve one, `reload` after editing);
+  `get_firefox_info` gains `mcp.containerRoutes`. `ZEN_EXT_MCP_CONTAINER_ROUTES=0` disables.
+- **Mid-load reuse.** A new tab reports `about:blank` until its navigation commits, so a second
+  `open_url` moments later used to open a duplicate (found by the live probe, not the stub).
+  The session now remembers what it asked each tab to load for 30s and counts that as the
+  tab's URL while it is blank; `new_page` and `open_url` also report the requested URL instead
+  of the extension's `about:blank`.
+- Coverage: `npm run test:container-routes` (17 tests, stub extension) and
+  `node scripts/probe-routes.mjs` (live Zen; reads the real table read-only, exercises
+  `open_url` against a throwaway one, verifies no pre-existing tab moved).
+
 ## Unreleased (nav-memory consolidation — daemon/server only, no extension change)
 
 Nav memory captured and distilled reliably but never *consolidated*: after three days of

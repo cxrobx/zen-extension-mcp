@@ -15,8 +15,12 @@ import { generateCssSelector, generateXPath } from './selectorGenerator.js';
 /**
  * Configuration
  */
-const MAX_DEPTH = 10;
-const MAX_NODES = 1000;
+// Framework-heavy applications (Google Admin, Azure Portal) routinely nest useful
+// controls more than 30 elements deep. This is a traversal safety limit, not a UI
+// hierarchy preference: stopping at 10 made whole panels disappear even though
+// document.body.innerText could read them.
+const MAX_DEPTH = 100;
+const MAX_NODES = 5000;
 
 /**
  * Tree walker options
@@ -56,6 +60,18 @@ export function walkTree(
   let counter = 0;
   const uidMap: UidEntry[] = [];
   let truncated = false;
+
+  function getSerializableProperty(el: HTMLElement, key: "value" | "href" | "src"): string | undefined {
+    try {
+      const value = (el as unknown as Record<string, unknown>)[key];
+      if (typeof value === "string") return value || undefined;
+      if (typeof value === "number" || typeof value === "boolean") return String(value);
+    } catch {
+      // Custom-element getters may throw or return page-owned objects. Snapshot
+      // results must stay structured-clonable across the extension boundary.
+    }
+    return undefined;
+  }
 
   function walk(el: Element, depth: number): WalkResult {
     // Check limits
@@ -147,9 +163,9 @@ export function walkTree(
     const roleAttr = el.getAttribute('role');
     const nameAttr = getElementName(el);
     const textAttr = getTextContent(el);
-    const valueAttr = (htmlEl as any).value;
-    const hrefAttr = (htmlEl as any).href;
-    const srcAttr = (htmlEl as any).src;
+    const valueAttr = getSerializableProperty(htmlEl, "value");
+    const hrefAttr = getSerializableProperty(htmlEl, "href");
+    const srcAttr = getSerializableProperty(htmlEl, "src");
     const ariaAttr = getAriaAttributes(el);
     const computedAttr = getComputedProperties(el);
 

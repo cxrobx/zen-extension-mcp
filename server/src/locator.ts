@@ -18,18 +18,20 @@ export function parseLocator(spec: string): ParsedLocator {
   }
   if (trimmed.startsWith("text:")) {
     const text = trimmed.slice(5);
-    const lit = xpathStringLiteral(text);
+    const lit = xpathStringLiteral(text.toLowerCase());
+    const normalized = asciiLower("normalize-space(.)");
     return {
       kind: "xpath",
-      expression: `//*[normalize-space(.)=${lit} and not(.//*[normalize-space(.)=${lit}])]`,
+      expression: `//*[${normalized}=${lit} and not(.//*[${normalized}=${lit}])]`,
     };
   }
   if (trimmed.startsWith("text*:")) {
     const text = trimmed.slice(6);
-    const lit = xpathStringLiteral(text);
+    const lit = xpathStringLiteral(text.toLowerCase());
+    const normalized = asciiLower("normalize-space(.)");
     return {
       kind: "xpath",
-      expression: `//*[contains(normalize-space(.), ${lit}) and not(.//*[contains(normalize-space(.), ${lit})])]`,
+      expression: `//*[contains(${normalized}, ${lit}) and not(.//*[contains(${normalized}, ${lit})])]`,
     };
   }
   if (trimmed.startsWith("role:")) {
@@ -49,14 +51,18 @@ function parseRoleLocator(spec: string): ParsedLocator {
   }
   const role = match[1] as string;
   const name: string | undefined = match[2] ?? match[3];
-  const roleLit = xpathStringLiteral(role);
-  let xpath = `//*[@role=${roleLit}`;
+  const roleLit = xpathStringLiteral(role.toLowerCase());
+  let xpath = `//*[${asciiLower("@role")}=${roleLit}`;
   if (name) {
-    const nameLit = xpathStringLiteral(name);
-    xpath += ` and (@aria-label=${nameLit} or normalize-space(.)=${nameLit})`;
+    const nameLit = xpathStringLiteral(name.toLowerCase());
+    xpath += ` and (${asciiLower("@aria-label")}=${nameLit} or ${asciiLower("normalize-space(.)")}=${nameLit})`;
   }
   xpath += "]";
   return { kind: "xpath", expression: xpath };
+}
+
+function asciiLower(expression: string): string {
+  return `translate(${expression}, 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz')`;
 }
 
 function xpathStringLiteral(value: string): string {

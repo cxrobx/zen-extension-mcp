@@ -37,6 +37,9 @@ type ToolHandler = (args: Record<string, unknown>, extra?: unknown) => Promise<T
 const NO_LOCATION_TOOLS = new Set([
   "list_containers",
   "set_default_container",
+  // container_routes takes a url only to explain how it would resolve; nothing is visited,
+  // so capturing it would attribute navigation memory to a page that was never opened.
+  "container_routes",
   "list_pages",
   "close_page",
   "get_firefox_info",

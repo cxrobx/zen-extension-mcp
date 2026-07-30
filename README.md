@@ -30,8 +30,8 @@ Per-tab tools take `tabId` (durable) or `pageIdx` (positional) — see [Addressi
 
 | Bucket | Tools |
 |---|---|
-| **Containers** | `list_containers`, `set_default_container`, `new_page_in_container` |
-| **Pages** | `list_pages`, `new_page`, `navigate_page`, `select_page`, `close_page`, `navigate_history`, `screenshot_page` |
+| **Containers** | `list_containers`, `container_routes`, `set_default_container`, `new_page_in_container` |
+| **Pages** | `open_url`, `list_pages`, `new_page`, `navigate_page`, `select_page`, `close_page`, `navigate_history`, `screenshot_page` |
 | **DOM read** | `take_snapshot`, `clear_snapshot`, `resolve_uid_to_selector`, `evaluate_script`, `get_page_text`, `read_page`, `find_by_text`, `wait_for` |
 | **DOM actions** | `click_by_uid`, `hover_by_uid`, `fill_by_uid`, `fill_form_by_uid`, `drag_by_uid_to_uid`, `click`, `hover`, `fill`, `type`, `drag`, `select_option`, `press_key`, `scroll` |
 | **Cookies/storage** | `get_cookies`, `set_cookies`, `clear_cookies`, `get_storage`, `set_storage`, `clear_storage` |
@@ -52,13 +52,44 @@ Optional guard for `pageIdx` callers: pass `expectTabSet` with the fingerprint f
 
 `get_firefox_info` reports `tabs.visible` and `tabs.fingerprint` for the active workspace. It reports no workspace id because **Zen exposes none to WebExtensions** — the fingerprint is the only available signal, and while it always changes on a workspace switch, it also changes on any ordinary tab open/close.
 
+### Container routing: let the domain pick the container
+
+Without a route table, a URL's container is decided by *which MCP entry issued the call* — so the same site lands in a different cookie jar depending on whether it was `zen-ext` or `zen-cxv`, and every call opens another duplicate tab. A **host → container table** makes the domain decide instead.
+
+The table is a user config file, absent by default, read from `$XDG_CONFIG_HOME/zen-extension-mcp/containers.json` (falling back to `~/.config/...`), or from `ZEN_EXT_MCP_ROUTES`:
+
+```json
+{
+  "routes": {
+    "Artist Advisory": ["artistadvisory.io"],
+    "CXVentures": ["cxventures.io"],
+    "Buildersbuddy": ["buildersbuddy.org", "localhost:3200"]
+  }
+}
+```
+
+Matching: a rule matches its host **and its subdomains** (`cxventures.io` covers `qes.cxventures.io`); `*.example.com` matches subdomains only; `localhost:3000` pins a port. The most specific matching rule wins — exact host over parent domain, port-pinned over port-agnostic.
+
+Precedence, highest first: **explicit argument** (`new_page_in_container`, `open_url({ container })`) → **host rule** → **session default** (`--container` / `set_default_container`) → no container. A host rule outranking the session default is what makes a project's URL land in that project's jar from any `zen-*` entry. Every tab-opening call prints the decision and its source, so routing is never invisible:
+
+```
+new page tabId=1226 -> https://artistadvisory.io/artists (Artist Advisory)
+container: Artist Advisory (firefox-container-8) via route "artistadvisory.io" in ~/.config/zen-extension-mcp/containers.json
+```
+
+`open_url` is the tool that uses this end to end: it resolves the container, then **goes to the tab already open on that host in that container** — focusing it if it is already at that URL, otherwise navigating it — and opens a new tab only when there is none. Reuse is `reuse: "host"` by default; `"exact"` reuses only a tab already at that URL, `"never"` always opens. Like `new_page`, it stays in the background unless `active: true`.
+
+Two limits worth knowing. Reuse only sees the **active Zen workspace**, so a matching tab in another workspace is invisible and a new tab is opened. And a tab **cannot change container** — `navigate_page` therefore says so when the URL you are loading is mapped elsewhere, rather than pretending it fixed it.
+
+Failure modes are loud on purpose: a rule naming a container that does not exist **errors and opens nothing**, because a silent fallback is how a login ends up in the wrong jar. A missing file is simply "no rules"; a malformed one reports the parse error instead of looking empty. Inspect the live state with `container_routes` (add `url` to see how one URL resolves, `reload: true` after editing the file) or the `mcp.containerRoutes` line in `get_firefox_info`. Set `ZEN_EXT_MCP_CONTAINER_ROUTES=0` to switch routing off for an entry.
+
 Dropped from `zen-mcp` because no WebExtension equivalent: `list_privileged_contexts` / `select_privileged_context` / `evaluate_privileged_script`, `set_firefox_prefs` / `get_firefox_prefs`, `restart_firefox`, `upload_file_by_uid`, `install_extension` / `list_extensions` / `uninstall_extension`.
 
 Deferred to v2 (need degraded-fidelity content-script bridges): `list_console_messages`, `clear_console_messages`, `list_network_requests`, `get_network_request`, `accept_dialog`, `dismiss_dialog`, `screenshot_by_uid`, full-page screenshot.
 
 Fidelity gaps to know:
 - `screenshot_page` captures the target tab's visible viewport in place via `tabs.captureTab(tabId)` — it does **not** activate the tab or change window focus. It defaults to JPEG quality 80; pass `format: "png"` for lossless output.
-- `evaluate_script` requires JSON-serializable args/results (the `scripting.executeScript` constraint). Returning DOM nodes or non-serializable objects fails.
+- `evaluate_script` requires JSON-serializable results (the `scripting.executeScript` constraint). Returning DOM nodes or non-serializable objects fails. The function body is transpiled and interpreted without `eval()`/`Function()`, so page CSP does not block it.
 - Large textual responses from `take_snapshot`, `evaluate_script`, `get_page_text`, `read_page`, `get_cookies`, and `get_storage` honor `maxBytes` + `cursor`.
 - Locator actions (`click`, `hover`, `fill`, `type`, `drag`, `select_option`, `press_key`) auto-wait for matches with `timeoutMs` and scroll targets into view before acting.
 
@@ -194,7 +225,7 @@ claude mcp add zen-personal     node /abs/path/.../server/dist/index.js -- --por
 
 `--container <name>` resolves lazily on first new-tab use using the existing `zen-mcp` resolver: 0 matches errors with the available list; >1 matches errors with the matching list.
 
-When `--container` is set, `new_page` defaults to that cookieStoreId. `new_page_in_container` always takes an explicit name. `set_default_container` updates the scope at runtime for that MCP entry. Both new-tab tools open in the background by default; pass `active: true` to foreground the tab.
+When `--container` is set, it is the **fallback** for URLs no host rule claims — see [Container routing](#container-routing-let-the-domain-pick-the-container), which outranks it. `new_page_in_container` always takes an explicit name and wins over both. `set_default_container` updates the fallback at runtime for that MCP entry. Both new-tab tools open in the background by default; pass `active: true` to foreground the tab.
 
 ## Architecture
 
@@ -232,7 +263,7 @@ State directories are mode `0700` and files are `0600`. Pending work is capped a
 
 ### Snapshot caching
 
-`take_snapshot` injects `extension/dist/snapshot/inject.js` via `scripting.executeScript({ files, world: 'MAIN' })`, then calls `window.__zenExtMcpCreateSnapshot`. The returned `uidMap` is cached in the background script keyed by tabId and persisted in `browser.storage.session`, so UIDs survive routine MV3 background suspension. Subsequent `click_by_uid`/`fill_by_uid`/etc. resolve uid -> selector via the cache, then run an inline action `func` against `document.querySelector(selector)`.
+`take_snapshot` injects `extension/dist/snapshot/inject.js` via `scripting.executeScript({ files, world: 'MAIN' })`, then calls `window.__zenExtMcpCreateSnapshot`. The returned `uidMap` is cached in the background script keyed by tabId and persisted in `browser.storage.session`, so UIDs survive routine MV3 background suspension. Subsequent `click_by_uid`/`fill_by_uid`/etc. resolve uid -> selector via the cache, then run an inline action `func` against `document.querySelector(selector)`. Traversal is bounded at 100 DOM levels and 5,000 captured nodes so deeply nested framework panels remain reachable without allowing unbounded snapshots.
 
 The cache is dropped on full navigation, SPA history updates, hash changes, and `tabs.onRemoved`. Take a fresh snapshot after any meaningful route change.
 
@@ -250,6 +281,13 @@ Navigation-memory verification is local and deterministic:
 npm run test:nav-memory
 node scripts/probe-navmem.mjs
 node scripts/smoke.mjs
+```
+
+Container routing has an offline suite and a live probe. The probe reads your real table read-only, then exercises `open_url` against a throwaway table so reuse can only land on its own tab:
+
+```sh
+npm run test:container-routes
+node scripts/probe-routes.mjs
 ```
 
 This opens a fresh Firefox profile with `extension/dist/` loaded as a temporary extension, no signing required. The extension is gone after the dev profile closes — fine for development.

@@ -43,6 +43,15 @@ import { ZenToolError } from "./errors.js";
 import { continueCursor, withResponseBudget } from "./response-budget.js";
 import { parseLocator } from "./locator.js";
 import { NavContext, withNavMeta } from "./nav-memory.js";
+import {
+  describeRouteTable,
+  loadRouteTable,
+  matchContainerRoute,
+  parseUrlTarget,
+  reloadRouteTable,
+  type RouteTable,
+  routeSummaryLine,
+} from "./routes.js";
 
 export interface ScopeRef {
   current: FirefoxContainer | null;
@@ -229,14 +238,30 @@ function sortedPages(pages: PageInfo[]): PageInfo[] {
   });
 }
 
-function formatPageList(pages: PageInfo[]): string {
-  const header = `${pages.length} tab${pages.length === 1 ? "" : "s"} visible in the active Zen workspace · tabSet=${tabSetFingerprint(pages)}\nAddress tabs by tabId (durable); [n] is a position in this listing and shifts when tabs open, close, or the workspace changes.`;
-  if (pages.length === 0) return `${header}\n(no pages)`;
-  const lines = pages.map((p, i) => {
-    const marker = p.active ? "*" : " ";
-    const container = p.containerName ?? "no container";
-    const title = p.title ? ` "${p.title}"` : "";
-    return `${marker} [${i}] tabId=${p.tabId} ${p.url}${title} (${container})`;
+/** "none" selects the tabs with no container; anything else is an exact container name. */
+function matchesContainerFilter(page: PageInfo, filter: string): boolean {
+  if (filter.toLowerCase() === "none") return page.containerName === null;
+  return (page.containerName ?? "").toLowerCase() === filter.toLowerCase();
+}
+
+function formatPageList(pages: PageInfo[], containerFilter?: string): string {
+  // The fingerprint and the [n] positions always describe the FULL visible set: filtering is
+  // a display convenience and must not renumber indexes that other tools resolve positionally.
+  const fingerprint = tabSetFingerprint(pages);
+  const entries = pages.map((page, index) => ({ page, index }));
+  const shown = containerFilter
+    ? entries.filter((entry) => matchesContainerFilter(entry.page, containerFilter))
+    : entries;
+  const scopeNote = containerFilter
+    ? `\nShowing ${shown.length} of ${pages.length} - container filter "${containerFilter}". Positions and tabSet still describe the full visible set.`
+    : "";
+  const header = `${pages.length} tab${pages.length === 1 ? "" : "s"} visible in the active Zen workspace · tabSet=${fingerprint}\nAddress tabs by tabId (durable); [n] is a position in this listing and shifts when tabs open, close, or the workspace changes.${scopeNote}`;
+  if (shown.length === 0) return `${header}\n(no pages)`;
+  const lines = shown.map(({ page, index }) => {
+    const marker = page.active ? "*" : " ";
+    const container = page.containerName ?? "no container";
+    const title = page.title ? ` "${page.title}"` : "";
+    return `${marker} [${index}] tabId=${page.tabId} ${page.url}${title} (${container})`;
   });
   return `${header}\n${lines.join("\n")}`;
 }
@@ -286,6 +311,85 @@ async function resolveScopeOnce(
   }
 }
 
+/** No container at all is Firefox's default cookie jar, which tabs report by this id. */
+const DEFAULT_COOKIE_STORE = "firefox-default";
+
+interface ContainerDecision {
+  container: FirefoxContainer | null;
+  /** Why this container was chosen, printed on every tab-opening call. */
+  reason: string;
+  /** True when a host rule decided it (as opposed to the session default). */
+  routed: boolean;
+  /** Present when the table has an equal-specificity conflict worth surfacing. */
+  warning?: string;
+}
+
+function decisionLine(decision: ContainerDecision): string {
+  if (!decision.container) {
+    return `container: none (Firefox default cookie jar) - ${decision.reason}`;
+  }
+  return `container: ${decision.container.name} (${decision.container.cookieStoreId}) via ${decision.reason}`;
+}
+
+function cookieStoreOf(decision: ContainerDecision): string {
+  return decision.container?.cookieStoreId ?? DEFAULT_COOKIE_STORE;
+}
+
+/**
+ * Two URLs name the same page for reuse purposes. Deliberately conservative: only a
+ * trailing-slash difference on an empty path is normalized away, because query and fragment
+ * carry real state on app routes (mail.google.com/#inbox is not the inbox root).
+ */
+function canonicalUrl(url: string): string {
+  try {
+    const parsed = new URL(url);
+    if (parsed.pathname === "/" && !parsed.search && !parsed.hash) {
+      return `${parsed.protocol}//${parsed.host}`;
+    }
+    return parsed.href.replace(/\/$/, "");
+  } catch {
+    return url.replace(/\/$/, "");
+  }
+}
+
+/**
+ * A tab reports about:blank until its first navigation commits, so an open_url issued
+ * seconds after another would not see the tab it just opened and would duplicate it. Keep a
+ * short-lived record of what this session asked each tab to load and treat that as the tab's
+ * URL while it is still blank. Only tabs this process drove are ever in here.
+ */
+const PENDING_URL_TTL_MS = 30_000;
+const PENDING_URL_MAX = 64;
+const pendingUrls = new Map<number, { url: string; at: number }>();
+
+function rememberPendingUrl(tabId: number, url: string): void {
+  const now = Date.now();
+  pendingUrls.set(tabId, { url, at: now });
+  if (pendingUrls.size <= PENDING_URL_MAX) return;
+  for (const [id, entry] of pendingUrls) {
+    if (now - entry.at > PENDING_URL_TTL_MS) pendingUrls.delete(id);
+  }
+  // Still oversized after dropping expired entries: evict oldest-first (Map keeps insertion order).
+  while (pendingUrls.size > PENDING_URL_MAX) {
+    const oldest = pendingUrls.keys().next();
+    if (oldest.done) break;
+    pendingUrls.delete(oldest.value);
+  }
+}
+
+function effectivePageUrl(page: PageInfo): string {
+  if (page.url && page.url !== "about:blank") return page.url;
+  const pending = pendingUrls.get(page.tabId);
+  if (!pending || Date.now() - pending.at > PENDING_URL_TTL_MS) return page.url;
+  return pending.url;
+}
+
+function sameHostAndPort(pageUrl: string, target: { host: string; port: string }): boolean {
+  const parsed = parseUrlTarget(pageUrl);
+  if (!parsed) return false;
+  return parsed.host === target.host && parsed.port === target.port;
+}
+
 function feedbackLine(r: InteractionResult): string {
   const fb = r.feedback;
   if (!fb) return "";
@@ -324,6 +428,80 @@ export function registerTools(
       return (mcp.registerTool as any)(name, config, nav.wrap(name, handler));
     },
   };
+
+  let routes: RouteTable = loadRouteTable();
+  if (routes.error) {
+    // Surfaced in get_firefox_info and container_routes too; a broken table must never look
+    // like an empty one, because "empty" silently means "put it wherever the session says".
+    process.stderr.write(
+      JSON.stringify({
+        ts: new Date().toISOString(),
+        source: "server",
+        message: "container route table failed to load",
+        error: routes.error,
+      }) + "\n",
+    );
+  }
+
+  // Container names resolve to cookieStoreIds via the extension; the set changes rarely, so
+  // cache per name to keep routing off the hot path.
+  const containerByName = new Map<string, FirefoxContainer>();
+  async function containerNamed(name: string, source: string): Promise<FirefoxContainer> {
+    const hit = containerByName.get(name);
+    if (hit) return hit;
+    try {
+      const resolved = await resolveScopeContainer(daemon, name);
+      containerByName.set(name, resolved);
+      return resolved;
+    } catch (err) {
+      const detail = err instanceof ZenToolError ? err.hint : undefined;
+      throw new ZenToolError(
+        "BAD_INPUT",
+        `${source} names container "${name}", which does not exist in this Zen`,
+        `${detail ?? ""} Nothing was opened - fix the name rather than letting the page land in the wrong cookie jar.`.trim(),
+      );
+    }
+  }
+
+  /**
+   * Which container owns this URL. Explicit argument beats a host rule beats the session
+   * default (--container / set_default_container). A route that names a missing container
+   * throws instead of falling back: a silent fallback is how a login lands in the wrong jar.
+   */
+  async function decideContainer(url: string, override?: string): Promise<ContainerDecision> {
+    if (override) {
+      return {
+        container: await containerNamed(override, "the container argument"),
+        reason: "the container argument",
+        routed: false,
+      };
+    }
+    const match = matchContainerRoute(routes, url);
+    if (match) {
+      const container = await containerNamed(match.container, `route "${match.pattern}"`);
+      const decision: ContainerDecision = {
+        container,
+        reason: `route "${match.pattern}" in ${routes.path}`,
+        routed: true,
+      };
+      if (match.ambiguousWith) {
+        decision.warning = `note: another rule of equal specificity maps this host to "${match.ambiguousWith}"; the first match won. Make one rule more specific.`;
+      }
+      return decision;
+    }
+    const scoped = await resolveScopeOnce(daemon, scope);
+    if (scoped) {
+      return { container: scoped, reason: "the session default container", routed: false };
+    }
+    return {
+      container: null,
+      reason:
+        routes.rules.length > 0
+          ? "no host rule matched this URL and no session default container is set"
+          : "no host rules are configured and no session default container is set",
+      routed: false,
+    };
+  }
   server.registerTool(
     "list_containers",
     {
@@ -340,6 +518,62 @@ export function registerTools(
             .map((c) => `- ${c.name} (${c.cookieStoreId}) [${c.color}/${c.icon}]`)
             .join("\n"),
         );
+      } catch (err) {
+        return fail(err);
+      }
+    },
+  );
+
+  server.registerTool(
+    "container_routes",
+    {
+      title: "Show container route table",
+      description:
+        "Show which Firefox container owns which domains - the host rules open_url and new_page follow, loaded from the container route file. Pass url to see exactly how one URL resolves (rule, container, or fallback), and reload=true to re-read the file after editing it.",
+      inputSchema: {
+        url: z.string().optional().describe("Resolve this URL against the table and report the decision."),
+        reload: z.boolean().optional().describe("Re-read the route file from disk before answering."),
+      },
+    },
+    async ({ url, reload }) => {
+      try {
+        if (reload) {
+          routes = reloadRouteTable();
+          containerByName.clear();
+        }
+        const lines = [describeRouteTable(routes)];
+        if (url) {
+          lines.push("");
+          const match = matchContainerRoute(routes, url);
+          if (match) {
+            lines.push(
+              `${url} -> "${match.container}" via rule "${match.pattern}" (${match.kind} host match)`,
+            );
+            if (match.ambiguousWith) {
+              lines.push(
+                `warning: an equal-specificity rule maps it to "${match.ambiguousWith}"; the first match wins.`,
+              );
+            }
+            // Report whether that container actually exists, since a typo here is invisible
+            // until the moment a page would have been opened in the wrong jar.
+            try {
+              const resolved = await containerNamed(match.container, `route "${match.pattern}"`);
+              lines.push(`container exists: ${resolved.name} (${resolved.cookieStoreId})`);
+            } catch (err) {
+              lines.push(err instanceof ZenToolError ? err.toToolText() : String(err));
+            }
+          } else {
+            const sessionDefault = scope.current?.name ?? scope.requestedName ?? null;
+            lines.push(
+              `${url} -> no matching rule; falls back to ${
+                sessionDefault
+                  ? `the session default container "${sessionDefault}"`
+                  : "no container (Firefox default cookie jar)"
+              }`,
+            );
+          }
+        }
+        return ok(lines.join("\n"));
       } catch (err) {
         return fail(err);
       }
@@ -374,13 +608,18 @@ export function registerTools(
     {
       title: "List pages",
       description:
-        "List the open tabs the browser exposes, ordered by (windowId, tab.index). Every line carries tabId=NNN - that is the durable handle to pass to other tools; the bracketed [n] is only a position in this listing. Zen Workspaces scope this list to the ACTIVE workspace: tabs in other workspaces are absent from the API entirely, so a workspace switch changes both the membership and the numbering. The header's tabSet fingerprint identifies the visible set and can be passed back as expectTabSet to make a later call fail rather than act on a re-pointed index.",
-      inputSchema: {},
+        "List the open tabs the browser exposes, ordered by (windowId, tab.index). Every line carries tabId=NNN - that is the durable handle to pass to other tools; the bracketed [n] is only a position in this listing. Zen Workspaces scope this list to the ACTIVE workspace: tabs in other workspaces are absent from the API entirely, so a workspace switch changes both the membership and the numbering. The header's tabSet fingerprint identifies the visible set and can be passed back as expectTabSet to make a later call fail rather than act on a re-pointed index. Pass container to show only one container's tabs; positions and the fingerprint still describe the full visible set.",
+      inputSchema: {
+        container: z
+          .string()
+          .optional()
+          .describe('Show only tabs in this container. Exact container name, or "none" for tabs with no container.'),
+      },
     },
-    async () => {
+    async ({ container }) => {
       try {
         const pages = await listPages(daemon);
-        return ok(formatPageList(pages));
+        return ok(formatPageList(pages, container));
       } catch (err) {
         return fail(err);
       }
@@ -392,7 +631,7 @@ export function registerTools(
     {
       title: "New page",
       description:
-        "Open a new tab at URL. Opens in the background by default (does not steal focus); pass active=true to foreground it. Uses the current default container if one is set (via --container or set_default_container).",
+        "Open a new tab at URL, always a new one. Prefer open_url, which reuses the tab already on that host instead of stacking duplicates. Container is chosen the same way in both: a matching host rule from the container route table wins, otherwise the session default (--container or set_default_container). Opens in the background by default (does not steal focus); pass active=true to foreground it.",
       inputSchema: {
         url: z.string().describe("Target URL"),
         active: z
@@ -403,13 +642,107 @@ export function registerTools(
     },
     async ({ url, active }) => {
       try {
+        const decision = await decideContainer(url);
         const params: { url: string; cookieStoreId?: string; active?: boolean } = { url };
         if (active !== undefined) params.active = active;
-        const scopedContainer = await resolveScopeOnce(daemon, scope);
-        if (scopedContainer) params.cookieStoreId = scopedContainer.cookieStoreId;
+        if (decision.container) params.cookieStoreId = decision.container.cookieStoreId;
         const r = await daemon.call<NewPageResult>(Methods.PagesNew, params);
+        rememberPendingUrl(r.tabId, url);
         const cn = r.containerName ?? "no container";
-        return withNavMeta(ok(`new page tabId=${r.tabId} -> ${r.url} (${cn})`), { url: r.url, navigated: true });
+        // The tab reports about:blank until the load commits; report what it was asked for.
+        const lines = [`new page tabId=${r.tabId} -> ${url} (${cn})`, decisionLine(decision)];
+        if (decision.warning) lines.push(decision.warning);
+        return withNavMeta(ok(lines.join("\n")), { url, navigated: true });
+      } catch (err) {
+        return fail(err);
+      }
+    },
+  );
+
+  server.registerTool(
+    "open_url",
+    {
+      title: "Open URL in the owning container",
+      description:
+        "Preferred way to reach a URL. Routes it to the container that owns the domain (host rules in the container route table, see container_routes), then goes to the tab already open on that host in that container instead of stacking up duplicates - focusing it if it is already at that URL, otherwise navigating it. Opens a new tab in the right container only when no such tab is visible. Host rules outrank the session default container, so a project's URL lands in that project's cookie jar from any zen-* server. Reuse only sees the ACTIVE Zen workspace; a matching tab in another workspace is invisible and a new tab is opened. Stays in the background unless active=true.",
+      inputSchema: {
+        url: z.string().describe("Target URL"),
+        container: z
+          .string()
+          .optional()
+          .describe(
+            "Exact container name, overriding both the route table and the session default. Use only to deliberately break the routing.",
+          ),
+        reuse: z
+          .enum(["host", "exact", "never"])
+          .optional()
+          .describe(
+            'How hard to look for an existing tab. "host" (default): reuse a tab already on that host in that container, navigating it to the URL. "exact": reuse only a tab already at that exact URL. "never": always open a new tab.',
+          ),
+        active: z
+          .boolean()
+          .optional()
+          .describe("Foreground the resulting tab. Default false: acts without stealing focus."),
+      },
+    },
+    async ({ url, container, reuse, active }) => {
+      try {
+        const mode: "host" | "exact" | "never" = reuse ?? "host";
+        const decision = await decideContainer(url, container);
+        const target = parseUrlTarget(url);
+        const store = cookieStoreOf(decision);
+        const tail: string[] = [decisionLine(decision)];
+        if (decision.warning) tail.push(decision.warning);
+
+        if (mode !== "never" && target) {
+          const pages = await listPages(daemon);
+          const candidates = pages.filter(
+            (p) => p.cookieStoreId === store && sameHostAndPort(effectivePageUrl(p), target),
+          );
+          const exact = candidates.find((p) => canonicalUrl(effectivePageUrl(p)) === canonicalUrl(url));
+          if (exact) {
+            if (active) await daemon.call(Methods.PagesSelect, { tabId: exact.tabId });
+            const shown = effectivePageUrl(exact);
+            tail.push(
+              `reuse: already open at this URL${shown !== exact.url ? " (still loading)" : ""}${active ? " - focused it" : " - left in the background"}. Address it with tabId=${exact.tabId}.`,
+            );
+            return withNavMeta(
+              ok([`found tabId=${exact.tabId} -> ${shown} (${exact.containerName ?? "no container"})`, ...tail].join("\n")),
+              { url: shown },
+            );
+          }
+          // Prefer the tab already in front; otherwise the first in (windowId, index) order,
+          // so the choice is deterministic across calls.
+          const pick = candidates.find((p) => p.active) ?? candidates[0];
+          if (pick && mode === "host") {
+            const was = effectivePageUrl(pick);
+            await daemon.call(Methods.PagesNavigate, { tabId: pick.tabId, url });
+            rememberPendingUrl(pick.tabId, url);
+            if (active) await daemon.call(Methods.PagesSelect, { tabId: pick.tabId });
+            tail.push(
+              `reuse: navigated the open ${target.host} tab in this container (${candidates.length} matched; was ${was})`,
+            );
+            return withNavMeta(
+              ok([`reused tabId=${pick.tabId} -> ${url} (${pick.containerName ?? "no container"})`, ...tail].join("\n")),
+              { url, navigated: true },
+            );
+          }
+          tail.push(
+            mode === "exact"
+              ? `reuse: no tab at that exact URL in this container (${candidates.length} on ${target.host}) - opened a new one.`
+              : `reuse: no tab on ${target.host} in this container in the active Zen workspace - opened a new one.`,
+          );
+        }
+
+        const params: { url: string; cookieStoreId?: string; active?: boolean } = { url };
+        if (active !== undefined) params.active = active;
+        if (decision.container) params.cookieStoreId = decision.container.cookieStoreId;
+        const r = await daemon.call<NewPageResult>(Methods.PagesNew, params);
+        rememberPendingUrl(r.tabId, url);
+        return withNavMeta(
+          ok([`new page tabId=${r.tabId} -> ${url} (${r.containerName ?? "no container"})`, ...tail].join("\n")),
+          { url, navigated: true },
+        );
       } catch (err) {
         return fail(err);
       }
@@ -421,7 +754,7 @@ export function registerTools(
     {
       title: "New page in container",
       description:
-        "Open a new tab at URL in the named Firefox container. Independent of the default container scope. Opens in the background by default (does not steal focus); pass active=true to foreground it.",
+        "Open a new tab at URL in the named Firefox container. Explicit and final: overrides both the container route table and the session default, and says so when a host rule disagreed. Opens in the background by default (does not steal focus); pass active=true to foreground it.",
       inputSchema: {
         name: z.string().describe("Exact Firefox container name"),
         url: z.string().describe("Target URL"),
@@ -433,14 +766,22 @@ export function registerTools(
     },
     async ({ name, url, active }) => {
       try {
-        const container = await resolveScopeContainer(daemon, name);
+        const container = await containerNamed(name, "the name argument");
         const params: { url: string; cookieStoreId: string; active?: boolean } = {
           url,
           cookieStoreId: container.cookieStoreId,
         };
         if (active !== undefined) params.active = active;
         const r = await daemon.call<NewPageResult>(Methods.PagesNew, params);
-        return withNavMeta(ok(`new page tabId=${r.tabId} -> ${r.url} (${container.name})`), { url: r.url, navigated: true });
+        rememberPendingUrl(r.tabId, url);
+        const lines = [`new page tabId=${r.tabId} -> ${url} (${container.name})`];
+        const match = matchContainerRoute(routes, url);
+        if (match && match.container !== container.name) {
+          lines.push(
+            `note: route "${match.pattern}" maps this host to "${match.container}"; opened in "${container.name}" as requested.`,
+          );
+        }
+        return withNavMeta(ok(lines.join("\n")), { url: r.url, navigated: true });
       } catch (err) {
         return fail(err);
       }
@@ -452,7 +793,7 @@ export function registerTools(
     {
       title: "Navigate page",
       description:
-        "Navigate one tab to URL. Address it by tabId (durable) or pageIdx (positional); both come from list_pages.",
+        "Navigate one tab to URL, in whatever container that tab already lives in - a tab cannot change container, so this reports it when a host rule maps the URL elsewhere. Use open_url to let the URL pick its own container. Address the tab by tabId (durable) or pageIdx (positional); both come from list_pages.",
       inputSchema: {
         ...targetShape(),
         url: z.string().describe("Target URL"),
@@ -462,7 +803,15 @@ export function registerTools(
       try {
         const page = await resolveTarget(daemon, { pageIdx, tabId, expectTabSet });
         await daemon.call(Methods.PagesNavigate, { tabId: page.tabId, url });
-        return withNavMeta(ok(`tabId=${page.tabId} -> ${url}`), { url, navigated: true });
+        rememberPendingUrl(page.tabId, url);
+        const lines = [`tabId=${page.tabId} -> ${url}`];
+        const match = matchContainerRoute(routes, url);
+        if (match && match.container !== page.containerName) {
+          lines.push(
+            `note: route "${match.pattern}" maps this host to container "${match.container}", but this tab is in ${page.containerName ? `"${page.containerName}"` : "no container"} and cannot be moved. Use open_url to land in the right one.`,
+          );
+        }
+        return withNavMeta(ok(lines.join("\n")), { url, navigated: true });
       } catch (err) {
         return fail(err);
       }
@@ -474,39 +823,51 @@ export function registerTools(
     {
       title: "Select page",
       description:
-        "Focus a tab. Provide exactly one of: tabId (durable handle from list_pages), pageIdx (positional), url (substring match), title (substring match). Errors if multiple match for url/title. Matching by url is the way back to a tab whose tabId is no longer visible after a Zen workspace switch.",
+        "Focus a tab. Provide exactly one of: tabId (durable handle from list_pages), pageIdx (positional), url (substring match), title (substring match). Errors if multiple match for url/title - pass container to disambiguate between the same site open in several containers. Matching by url is the way back to a tab whose tabId is no longer visible after a Zen workspace switch.",
       inputSchema: {
         pageIdx: z.number().int().nonnegative().optional().describe(PAGE_IDX_DESC),
         tabId: z.number().int().optional().describe(TAB_ID_DESC),
         url: z.string().optional(),
         title: z.string().optional(),
+        container: z
+          .string()
+          .optional()
+          .describe(
+            'Restrict url/title matching to one container. Exact container name, or "none" for tabs with no container.',
+          ),
       },
     },
-    async ({ pageIdx, tabId, url, title }) => {
+    async ({ pageIdx, tabId, url, title, container }) => {
       try {
         if ((typeof pageIdx === "number" ? 1 : 0) + (typeof tabId === "number" ? 1 : 0) > 1) {
           throw new ZenToolError("BAD_INPUT", "provide exactly one of pageIdx or tabId, not both");
         }
         const pages = await listPages(daemon);
+        // tabId and pageIdx address a tab directly, so the container filter only narrows the
+        // ambiguous substring searches.
+        const searchable = container
+          ? pages.filter((p) => matchesContainerFilter(p, container))
+          : pages;
+        const inContainer = container ? ` in container "${container}"` : "";
         const target = ((): PageInfo => {
           if (typeof tabId === "number") return pageByTabId(pages, tabId);
           if (typeof pageIdx === "number") return pageByIdx(pages, pageIdx);
           if (url) {
-            const matches = pages.filter((p) => p.url.includes(url));
-            if (matches.length === 0) throw new Error(`no page matches url substring "${url}"`);
+            const matches = searchable.filter((p) => p.url.includes(url));
+            if (matches.length === 0) throw new Error(`no page matches url substring "${url}"${inContainer}`);
             if (matches.length > 1) {
               throw new Error(
-                `${matches.length} pages match url "${url}"; refine the substring or use tabId`,
+                `${matches.length} pages match url "${url}"${inContainer}; refine the substring, pass container, or use tabId`,
               );
             }
             return matches[0]!;
           }
           if (title) {
-            const matches = pages.filter((p) => p.title.includes(title));
-            if (matches.length === 0) throw new Error(`no page matches title substring "${title}"`);
+            const matches = searchable.filter((p) => p.title.includes(title));
+            if (matches.length === 0) throw new Error(`no page matches title substring "${title}"${inContainer}`);
             if (matches.length > 1) {
               throw new Error(
-                `${matches.length} pages match title "${title}"; refine or use tabId`,
+                `${matches.length} pages match title "${title}"${inContainer}; refine, pass container, or use tabId`,
               );
             }
             return matches[0]!;
@@ -1699,6 +2060,7 @@ export function registerTools(
           `mcp.server: ${identity.name} ${identity.version}`,
           `mcp.daemonUrl: ${identity.daemonUrl}`,
           `mcp.scope: ${scope.current ? `${scope.current.name} (${scope.current.cookieStoreId})` : scope.requestedName ? `${scope.requestedName} (pending resolution)` : "(none)"}`,
+          `mcp.containerRoutes: ${routeSummaryLine(routes)}`,
           `extension.id: ${r.extensionId}`,
           `extension.version: ${r.extensionVersion}`,
           `extension.platform: ${r.platform}`,

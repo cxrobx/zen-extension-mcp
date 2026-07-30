@@ -230,6 +230,30 @@ async function ensureSnapshotInjected(tabId: number, allFrames: boolean): Promis
   }
 }
 
+async function ensureEvaluatorInjected(tabId: number): Promise<void> {
+  try {
+    const alreadyPresent = await executeInMain<boolean>(
+      tabId,
+      () =>
+        typeof (window as unknown as { __zenExtMcpEvaluate?: unknown })
+          .__zenExtMcpEvaluate === "function",
+      [],
+    );
+    if (alreadyPresent) return;
+    await withTimeout(
+      browser.scripting.executeScript({
+        target: { tabId },
+        files: ["evaluate/inject.js"],
+        world: "MAIN" as browser.scripting.ExecutionWorld,
+      }),
+      EXECUTE_SCRIPT_TIMEOUT_MS,
+      `evaluator injection did not finish within ${EXECUTE_SCRIPT_TIMEOUT_MS}ms`,
+    );
+  } catch (err) {
+    throw await scriptError(tabId, err);
+  }
+}
+
 async function executeInMain<T>(
   tabId: number,
   func: (...args: unknown[]) => T | Promise<T>,
@@ -1596,9 +1620,16 @@ export const handlers: Record<string, Handler> = {
     const params = raw as EvaluateScriptParams;
     const tabId = requireNumber(params?.tabId, "tabId");
     const code = requireString(params?.code, "code");
+    await ensureEvaluatorInjected(tabId);
     const result = await executeInMain<unknown>(
       tabId,
-      (src) => new Function(src as string)(),
+      (src) => {
+        const fn = (window as unknown as {
+          __zenExtMcpEvaluate?: (source: string) => unknown;
+        }).__zenExtMcpEvaluate;
+        if (!fn) throw new Error("CSP-safe evaluator is unavailable");
+        return fn(src as string);
+      },
       [code],
     );
     return { result };

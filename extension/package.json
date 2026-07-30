@@ -10,10 +10,13 @@
     "sign": "bash scripts/sign.sh"
   },
   "dependencies": {
-    "@zen-ext-mcp/shared": "*"
+    "@babel/standalone": "^7.28.5",
+    "@zen-ext-mcp/shared": "*",
+    "eval5": "^1.4.8"
   },
   "devDependencies": {
     "@mozilla/readability": "^0.6.0",
+    "@types/babel__standalone": "^7.1.9",
     "@types/firefox-webext-browser": "^120.0.4",
     "@types/turndown": "^5.0.6",
     "turndown": "^7.2.4",

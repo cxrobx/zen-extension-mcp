@@ -8,6 +8,9 @@ import { createServer } from "node:http";
 const here = dirname(fileURLToPath(import.meta.url));
 const root = resolve(here, "..");
 
+const DEEP_OPEN = '<div class="deep-wrapper">'.repeat(40);
+const DEEP_CLOSE = "</div>".repeat(40);
+
 const FIXTURE_HTML = `<!doctype html>
 <html lang="en">
 <head>
@@ -21,6 +24,7 @@ const FIXTURE_HTML = `<!doctype html>
     #rich-editor { min-height: 3rem; padding: 0.5rem; border: 1px solid #aaa; }
     .spacer { height: 1400px; }
     [data-hovered="yes"] { background: lime; }
+    #deep-btn { text-transform: uppercase; }
   </style>
 </head>
 <body>
@@ -51,6 +55,10 @@ const FIXTURE_HTML = `<!doctype html>
   <button id="below-fold" type="button">Below fold</button>
   <div id="below-result">initial</div>
   <div id="delayed-root"></div>
+  <div id="deep-result">initial</div>
+  ${DEEP_OPEN}
+    <button id="deep-btn" type="button">Deep action</button>
+  ${DEEP_CLOSE}
 
   <script>
     const btn = document.getElementById('click-btn');
@@ -96,6 +104,9 @@ const FIXTURE_HTML = `<!doctype html>
         document.getElementById('delayed-root').appendChild(btn);
       }, 700);
     };
+    document.getElementById('deep-btn').addEventListener('click', () => {
+      document.getElementById('deep-result').textContent = 'deep clicked';
+    });
   </script>
 </body>
 </html>`;
@@ -182,6 +193,9 @@ function findUidForTagId(snapshot, tag, idHint) {
 async function main() {
   const server = createServer((req, res) => {
     res.setHeader("content-type", "text/html; charset=utf-8");
+    // Inline scripts are allowed for the fixture setup, but dynamic compilation is
+    // deliberately blocked. This reproduces admin.google.com's unsafe-eval failure.
+    res.setHeader("content-security-policy", "script-src 'unsafe-inline'; object-src 'none'");
     res.end(FIXTURE_HTML);
   });
   await new Promise((r) => server.listen(0, "127.0.0.1", r));
@@ -288,6 +302,10 @@ async function main() {
   console.log(`> hover-target dataset.hovered -> ${hoverData}`);
   if (hoverData !== "yes") throw new Error(`expected "yes", got ${hoverData}`);
 
+  const richDocumentFocused = await mcp.callTool("evaluate_script", {
+    pageIdx: idx,
+    code: "return document.hasFocus();",
+  });
   await step("fill contenteditable mini-editor", async () => {
     console.log(
       await mcp.callTool("fill", {
@@ -302,8 +320,11 @@ async function main() {
     code: "var el=document.getElementById('rich-editor'); return {text: el.textContent, beforeinput: el.dataset.beforeinput || null};",
   });
   console.log(`> rich editor -> ${richState}`);
-  if (!richState.includes("rich text sticks") || !richState.includes("yes")) {
-    throw new Error(`rich editor did not receive beforeinput-backed text: ${richState}`);
+  if (!richState.includes("rich text sticks")) {
+    throw new Error(`rich editor text did not stick: ${richState}`);
+  }
+  if (richDocumentFocused !== "true" && !richState.includes("yes")) {
+    throw new Error(`background rich editor did not receive synthetic beforeinput: ${richState}`);
   }
 
   await step("pointer-event-only click by locator", async () => {
@@ -350,6 +371,28 @@ async function main() {
   });
   console.log(`> delayed clicked -> ${delayedClicked}`);
   if (delayedClicked !== "yes") throw new Error(`delayed click failed: ${delayedClicked}`);
+
+  const deepSnapshot = await step("snapshot reaches a 40-level-deep control", () =>
+    mcp.callTool("take_snapshot", { pageIdx: idx, includeAll: true }),
+  );
+  const deepUid = findUidForTagId(deepSnapshot, "button", "Deep action");
+  if (!deepUid) throw new Error("deep action button missing from snapshot");
+  console.log(`> deep action uid=${deepUid}`);
+
+  await step("rendered-text locator ignores CSS text-transform casing", async () => {
+    console.log(
+      await mcp.callTool("click", {
+        pageIdx: idx,
+        selector: "text:DEEP ACTION",
+      }),
+    );
+  });
+  const deepState = await mcp.callTool("evaluate_script", {
+    pageIdx: idx,
+    code: "const el = document.getElementById('deep-result'); return el?.textContent ?? null;",
+  });
+  console.log(`> deep result -> ${deepState}`);
+  if (deepState !== "deep clicked") throw new Error(`deep locator click failed: ${deepState}`);
 
   await mcp.callTool("close_page", { pageIdx: idx });
 

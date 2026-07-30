@@ -27,6 +27,21 @@ await build({
   logLevel: "info",
 });
 
+// Babel standalone is intentionally self-contained and therefore large. Minify
+// this page-injected evaluator separately and omit its source map so every
+// evaluate_script call does not ship multi-megabyte debug text into the tab.
+await build({
+  entryPoints: [join(srcDir, "evaluate/inject.ts")],
+  outfile: join(outDir, "evaluate/inject.js"),
+  bundle: true,
+  format: "iife",
+  platform: "browser",
+  target: "firefox115",
+  minify: true,
+  sourcemap: false,
+  logLevel: "info",
+});
+
 await cp(join(srcDir, "manifest.json"), join(outDir, "manifest.json"));
 await mkdir(join(outDir, "options"), { recursive: true });
 await cp(join(srcDir, "options/options.html"), join(outDir, "options/options.html"));
