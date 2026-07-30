@@ -4,6 +4,49 @@ All notable changes to this project will be documented here. Versions track the
 extension manifest and the AMO-signed XPI artifacts. Server, daemon, and shared
 package versions move together with the extension.
 
+## Unreleased — renamed `zen-extension-mcp` → `zen-mcp` (breaking for existing installs)
+
+This project was named `zen-extension-mcp` to distinguish it from a Marionette/Selenium
+sibling — a local fork of
+[`firefox-devtools-mcp`](https://github.com/mozilla/firefox-devtools-mcp) — that owned the
+name `zen-mcp`. That fork has been archived and removed: it required launching the browser
+with `--marionette`, which defeats the entire point of driving the browser you already have
+open, and it had never actually been registered as an MCP server. With one project left,
+it takes the shorter name.
+
+**If you are upgrading an existing install, these move:**
+
+| Was | Now |
+|---|---|
+| `~/.config/zen-extension-mcp/` | `~/.config/zen-mcp/` (auth token, `containers.json`, nav-memory) |
+| `~/Library/Logs/zen-extension-mcp/` | `~/Library/Logs/zen-mcp/` |
+| `ZEN_EXT_MCP_*` env vars | `ZEN_MCP_*` (e.g. `ZEN_MCP_NAV_MEMORY`, `ZEN_MCP_ROUTES`) |
+| launchd label `io.cxrobx.zen-extension-mcp.daemon` | `io.cxrobx.zen-mcp.daemon` |
+| npm scope `@zen-ext-mcp/*` | `@zen-mcp/*` |
+
+`mv` the two directories, re-point your MCP registrations at the new
+`server/dist/index.js` path, and reload the launchd job. There is no compatibility shim —
+a stale path fails as "no rules" or "no token" rather than loudly, so move them rather
+than leaving both.
+
+**The extension itself is unchanged.** Its gecko id stays `zen-ext-mcp@cxrobx` and its
+version stays 0.0.17, so no re-sign and no reinstall — renaming the id would mean a new
+AMO listing and would wipe `browser.storage.local` (daemon URL + token + host grant). The
+display name follows on the next signed release.
+
+**Capabilities that left with the fork,** and what to use instead: browser prefs
+(`set_firefox_prefs`) → `user.js` / `about:config`; chrome-privileged JS → unavailable, a
+hard WebExtension boundary; file upload by path → Playwright; full network response bodies
+→ not yet built, but reachable in-extension via `webRequest.filterResponseData()`.
+
+Adding a Marionette mode here was considered and rejected: the launch flag would make such
+tools dark by default, and the privileged ones additionally need
+`--remote-allow-system-access`, which exposes **unauthenticated** chrome-privileged
+execution to any process that can reach `127.0.0.1:2828`.
+
+Verified on Zen 1.21.9b / Firefox 153: 8 live probes, the container-routes and tab-target
+suites, nav-memory, and the offline smoke test all pass after the move.
+
 ## Unreleased (container routing — server only, no extension change)
 
 A URL's container was decided by *which MCP entry made the call*, not by the URL. So
@@ -173,7 +216,7 @@ newly-visible set.
 - New tool: `get_firefox_info`. Returns MCP server identity (name, version,
   daemon URL, current container scope) plus extension-side runtime data
   (extension id/version, platform, userAgent, window/tab/container counts,
-  protocol version). Replaces zen-mcp's `get_firefox_output` semantics.
+  protocol version). Replaces the Marionette fork's `get_firefox_output` semantics.
 - README rewrite: full v1 tool list, AMO key creation, install gotchas
   (in-place upgrade flakiness, host-permission opt-in for screenshot),
   multi-MCP-entry pattern, troubleshooting.
@@ -189,7 +232,7 @@ newly-visible set.
 
 ## 0.0.5 (Milestone 3)
 
-- Ported `zen-mcp/src/firefox/snapshot/injected/` to
+- Ported the Marionette fork's `src/firefox/snapshot/injected/` to
   `extension/src/snapshot/`. Builds as a separate esbuild IIFE entry
   (`dist/snapshot/inject.js`) that exposes `window.__zenExtMcpCreateSnapshot`,
   lazy-injected via `scripting.executeScript({ files, world: 'MAIN' })`.
@@ -235,6 +278,6 @@ newly-visible set.
   with exponential backoff capped at 10s.
 - Daemon binds 127.0.0.1:8765 by default; `--port <n>` flag for collisions.
 - MCP server `--container <name>` resolves at startup using the
-  `resolveContainerByName` helper ported verbatim from `zen-mcp`.
+  `resolveContainerByName` helper ported verbatim from the Marionette fork.
 - Signed via AMO unlisted (`web-ext sign --channel=unlisted`); install once
   into daily Zen, persists across browser restarts.

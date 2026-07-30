@@ -212,27 +212,32 @@ A simple launchd plist for keeping the daemon running:
 </plist>
 ```
 
-Load it: `launchctl load ~/Library/LaunchAgents/io.cxrobx.zen-mcp.daemon.plist`.
+Load it: `launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/io.cxrobx.zen-mcp.daemon.plist` (`bootout` to stop it; the older `load`/`unload` verbs are deprecated).
 
 ### Register MCP servers in Claude Code
 
 Each entry is short-lived (one per Claude Code session) and connects to the daemon as a client.
 
+Everything after `--` is the subprocess command, so the whole `node …` invocation goes there.
+
 **Single, no scoping**:
 
 ```sh
-claude mcp add zen-ext node /abs/path/to/zen-mcp/server/dist/index.js -- --port 8766
+claude mcp add zen-ext -s user -- node /abs/path/to/zen-mcp/server/dist/index.js --port 8766
 ```
 
 **Container-scoped** (one per container — they all share the daemon and extension):
 
 ```sh
-claude mcp add zen-cxv          node /abs/path/.../server/dist/index.js -- --port 8766 --container CXVentures
-claude mcp add zen-buildersbuddy node /abs/path/.../server/dist/index.js -- --port 8766 --container Buildersbuddy
-claude mcp add zen-personal     node /abs/path/.../server/dist/index.js -- --port 8766 --container Personal
+P=/abs/path/to/zen-mcp/server/dist/index.js
+claude mcp add zen-cxv           -s user -- node "$P" --port 8766 --container CXVentures
+claude mcp add zen-buildersbuddy -s user -- node "$P" --port 8766 --container Buildersbuddy
+claude mcp add zen-personal      -s user -- node "$P" --port 8766 --container Personal
 ```
 
-`--container <name>` resolves lazily on first new-tab use using the existing `zen-mcp` resolver: 0 matches errors with the available list; >1 matches errors with the matching list.
+A container name containing a space must be quoted as one argument: `--container "Artist Advisory"`. Use `-s user` for entries you want in every session; the default scope is `local` (this project only). Confirm with `claude mcp list` — each entry should report `✔ Connected`, which also proves the daemon and extension are both up.
+
+`--container <name>` resolves lazily on first new-tab use: 0 matches errors with the available list; >1 matches errors with the matching list.
 
 When `--container` is set, it is the **fallback** for URLs no host rule claims — see [Container routing](#container-routing-let-the-domain-pick-the-container), which outranks it. `new_page_in_container` always takes an explicit name and wins over both. `set_default_container` updates the fallback at runtime for that MCP entry. Both new-tab tools open in the background by default; pass `active: true` to foreground the tab.
 

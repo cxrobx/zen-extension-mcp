@@ -7,7 +7,7 @@ Status: passing.
 1. **Three-process architecture works end-to-end.** Daemon owns the WebSocket port; MCP server connects as a client; the extension connects in the same role on the other side. Requests fan out from N MCP-server clients to the single extension; responses route back to the originating client.
 2. **Auth handshake works.** Daemon auto-generates a 32-byte token on first launch (`~/.config/zen-mcp/auth.token`, mode 0600) and rejects connections that present a wrong or missing token within a 5s `hello` window. Constant-time compared via `crypto.timingSafeEqual`.
 3. **Heartbeat works.** Daemon sends WebSocket pings every 30s; on missing pong the next tick terminates the connection. Server and extension both auto-reconnect with exponential backoff (500ms -> 10s).
-4. **`--container <name>` resolves at server startup** using the same `resolveContainerByName` logic ported verbatim from `zen-mcp/src/firefox/container.ts`. Valid names succeed; invalid names refuse startup with the existing fork's error format (lists all available containers).
+4. **`--container <name>` resolves at server startup** using the same `resolveContainerByName` logic ported verbatim from the Marionette fork's `src/firefox/container.ts`. Valid names succeed; invalid names refuse startup with the existing fork's error format (lists all available containers).
 5. **Single MCP tool reaches the extension.** `list_containers` round-trips through the bridge and returns a formatted list.
 
 ## Smoke evidence
@@ -48,7 +48,7 @@ node server/dist/index.js --container DoesNotExist # exits 1 with "Container ...
 | `daemon/src/auth.ts` | Token generation, constant-time compare |
 | `server/src/index.ts` | MCP stdio server, registers `list_containers` |
 | `server/src/daemon-client.ts` | WS client with reconnect/backoff |
-| `server/src/container.ts` | `resolveContainerByName`, `formatAvailableContainers` (ported from `zen-mcp`) |
+| `server/src/container.ts` | `resolveContainerByName`, `formatAvailableContainers` (ported from the Marionette fork) |
 | `extension/src/manifest.json` | MV3 manifest, gecko id `zen-ext-mcp@cxrobx`, min Firefox 115 |
 | `extension/src/background.ts` | Background entrypoint, wires settings -> connection |
 | `extension/src/connection.ts` | WS client, hello/welcome, RPC dispatch, reconnect |
